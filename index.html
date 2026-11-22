@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.0</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.1</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.10.0';
+      const APP_VERSION = 'v1.10.1';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -428,7 +428,8 @@
       const STORAGE_KEYS = {
         STATE: 'bi_fleet_jateng_state_v1',
         CONFIG: 'bi_fleet_jateng_integration_cfg_v1',
-        SESSION: 'bi_fleet_jateng_session_v1',
+        SESSION: 'bi_fleet_jateng_user_session_v2',
+        SESSION_LEGACY: 'bi_fleet_jateng_session_v1',
         SYNC_LOG: 'bi_fleet_jateng_synclog_v1',
         ADMIN_LIST: 'bi_fleet_jateng_admin_list_v1',
         ADMIN_PIN_HASH: 'bi_fleet_jateng_admin_pin_hash_v1',
@@ -2466,9 +2467,50 @@
         };
       }
 
+      function saveUserSession(sessionObj) {
+        try {
+          if (!sessionObj || !sessionObj.isAuthenticated || sessionObj.role === 'admin' || !String(sessionObj.nama || '').trim()) {
+            return;
+          }
+          localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify({
+            nip: String(sessionObj.nip || '').trim(),
+            email: String(sessionObj.email || '').trim(),
+            nama: String(sessionObj.nama || '').trim(),
+            unit_kerja: normalizeUnitKerja(sessionObj.unit_kerja, ''),
+            role: sessionObj.role === 'driver' ? 'driver' : 'pegawai',
+            driver_id: sessionObj.driver_id || null,
+            isAuthenticated: true
+          }));
+        } catch (_) {}
+      }
+
+      function clearUserSession() {
+        try {
+          localStorage.removeItem(STORAGE_KEYS.SESSION);
+          localStorage.removeItem(STORAGE_KEYS.SESSION_LEGACY);
+        } catch (_) {}
+      }
+
       function loadInitialSession() {
-        // Tidak ada auto-login akun saat aplikasi dibuka; bersihkan sisa auto-session lama bila ada
-        try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+        // Bersihkan key auto-login lama (v1) agar tidak pernah auto-login akun bawaan
+        try { localStorage.removeItem(STORAGE_KEYS.SESSION_LEGACY); } catch (_) {}
+        try {
+          const raw = localStorage.getItem(STORAGE_KEYS.SESSION);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.isAuthenticated === true && parsed.role !== 'admin' && String(parsed.nama || '').trim()) {
+              return {
+                nip: String(parsed.nip || '').trim(),
+                email: String(parsed.email || '').trim(),
+                nama: String(parsed.nama || '').trim(),
+                unit_kerja: normalizeUnitKerja(parsed.unit_kerja, ''),
+                role: parsed.role === 'driver' ? 'driver' : 'pegawai',
+                driver_id: parsed.driver_id || null,
+                isAuthenticated: true
+              };
+            }
+          }
+        } catch (_) {}
         return createEmptySession();
       }
 
@@ -3315,7 +3357,7 @@
         // Pastikan session tersimpan tidak mengembalikan role admin maupun auto-login
         if (AppState.session && AppState.session.role === 'admin') {
           AppState.session = createEmptySession();
-          try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+          clearUserSession();
           AppState.bookingForm.nama_peminjam = '';
           AppState.bookingForm.unit_kerja = '';
           AppState.bookingForm.unitSearch = '';
@@ -9471,6 +9513,7 @@
             driver_id: matchedDriver ? matchedDriver.id : null,
             isAuthenticated: true
           };
+          saveUserSession(AppState.session);
           LoginHistory.record(Object.assign({ identifier }, AppState.session));
 
           AppState.bookingForm.nama_peminjam = nama;
@@ -9541,7 +9584,7 @@
           closeMobileDrawer();
           const prevName = AppState.session && AppState.session.nama ? AppState.session.nama : '';
           AppState.session = createEmptySession();
-          try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+          clearUserSession();
           AppState.bookingForm.nama_peminjam = '';
           AppState.bookingForm.unit_kerja = '';
           AppState.bookingForm.unitSearch = '';
@@ -9563,6 +9606,7 @@
             driver_id: acc.driver_id || null,
             isAuthenticated: true
           };
+          saveUserSession(AppState.session);
           LoginHistory.record(acc);
 
           AppState.bookingForm.nama_peminjam = acc.nama;
