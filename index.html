@@ -344,7 +344,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.6</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.7</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -400,7 +400,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.8.6';
+      const APP_VERSION = 'v1.8.7';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -1974,37 +1974,22 @@
         return seeded;
       }
 
+      function createEmptySession() {
+        return {
+          nip: '',
+          email: '',
+          nama: '',
+          unit_kerja: '',
+          role: 'pegawai',
+          driver_id: null,
+          isAuthenticated: false
+        };
+      }
+
       function loadInitialSession() {
-        try {
-          const raw = localStorage.getItem(STORAGE_KEYS.SESSION);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed && /hendra kusumo/i.test(String(parsed.nama || ''))) {
-              parsed.nama = DEFAULT_PRIMARY_ADMIN.nama;
-              parsed.email = '';
-            } else if (parsed && (/aditya pratama/i.test(String(parsed.nama || '')) || /aditya\.pratama@bi\.go\.id/i.test(String(parsed.email || '')))) {
-              parsed.nip = 'ahmadrizal807@gmail.com';
-              parsed.email = 'ahmadrizal807@gmail.com';
-              parsed.nama = 'Ahmad Rizal';
-              parsed.unit_kerja = 'LOGISTIK';
-              try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed)); } catch (_) {}
-            } else if (parsed && /slamet riyadi/i.test(String(parsed.nama || ''))) {
-              parsed.nama = 'Iwan';
-              parsed.nip = 'BI-DRV-1003';
-              parsed.email = 'iwan@bi.go.id';
-            } else if (parsed && /budi santoso/i.test(String(parsed.nama || ''))) {
-              parsed.nama = 'Andrijanto';
-              parsed.nip = 'BI-DRV-1001';
-              parsed.email = 'andrijanto@bi.go.id';
-            }
-            if (parsed && parsed.role !== 'admin' && parsed.unit_kerja && LEGACY_UNIT_KERJA_MAP[String(parsed.unit_kerja).trim().toLowerCase()]) {
-              parsed.unit_kerja = normalizeUnitKerja(parsed.unit_kerja, 'LOGISTIK');
-              try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed)); } catch (_) {}
-            }
-            return parsed;
-          }
-        } catch (_) {}
-        return Object.assign({}, DEMO_ACCOUNTS[0]); // Default: Ahmad Rizal (ahmadrizal807@gmail.com)
+        // Tidak ada auto-login akun saat aplikasi dibuka; bersihkan sisa auto-session lama bila ada
+        try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+        return createEmptySession();
       }
 
       const AdminRevealedDriverPins = new Set();
@@ -2028,8 +2013,8 @@
           jam_mulai: INITIAL_BOOKING_SLOT.jam_mulai,
           jam_selesai: INITIAL_BOOKING_SLOT.jam_selesai,
           nama_peminjam: '',
-          unit_kerja: 'LOGISTIK',
-          unitSearch: 'LOGISTIK',
+          unit_kerja: '',
+          unitSearch: '',
           unitDropdownOpen: false,
           tujuan: '',
           keperluan: '',
@@ -2186,11 +2171,11 @@
         }
       };
 
-      // Mode default saat aplikasi pertama dibuka selalu role "Pegawai"
+      // Mode default saat aplikasi pertama dibuka selalu role "Pegawai" tanpa auto-login
       AppState.role = 'pegawai';
       AppState.activeNav = ROLE_NAVS_DEFAULT_NAV('pegawai');
-      AppState.bookingForm.nama_peminjam = AppState.session.nama || 'Ahmad Rizal';
-      AppState.bookingForm.unit_kerja = normalizeUnitKerja(AppState.session.unit_kerja, UNIT_KERJA_LIST[0]);
+      AppState.bookingForm.nama_peminjam = AppState.session.isAuthenticated ? (AppState.session.nama || '') : '';
+      AppState.bookingForm.unit_kerja = AppState.session.isAuthenticated ? normalizeUnitKerja(AppState.session.unit_kerja, '') : '';
       AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
       AppState.selectedDriverId = DriverAuth.getActiveDriverId();
 
@@ -2852,13 +2837,13 @@
         closeMobileDrawer();
         AppState.role = 'pegawai';
         AppState.activeNav = ROLE_NAVS.pegawai[0].id;
-        // Pastikan session tersimpan tidak mengembalikan role admin
+        // Pastikan session tersimpan tidak mengembalikan role admin maupun auto-login
         if (AppState.session && AppState.session.role === 'admin') {
-          AppState.session = Object.assign({}, DEMO_ACCOUNTS[0]);
-          try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(AppState.session)); } catch (_) {}
-          AppState.bookingForm.nama_peminjam = AppState.session.nama;
-          AppState.bookingForm.unit_kerja = AppState.session.unit_kerja;
-          AppState.bookingForm.unitSearch = AppState.session.unit_kerja;
+          AppState.session = createEmptySession();
+          try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+          AppState.bookingForm.nama_peminjam = '';
+          AppState.bookingForm.unit_kerja = '';
+          AppState.bookingForm.unitSearch = '';
         }
         renderAll();
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2899,7 +2884,8 @@
                 nama: primary.nama,
                 unit_kerja: primary.unit,
                 role: 'admin',
-                driver_id: null
+                driver_id: null,
+                isAuthenticated: true
               };
             }
             AppState.role = 'admin';
@@ -3092,26 +3078,46 @@
               ` : ''}
             </div>
 
-            <!-- Session Profile Card & Tombol Logout / Ganti Akun -->
+            <!-- Session Profile Card & Tombol Login / Logout -->
             <div class="p-4 border-t border-white/10 bg-[#072A45]/60 shrink-0 safe-bottom">
-              <div class="flex items-center gap-3">
-                <div class="w-9 h-9 rounded-full bg-white/15 border border-white/20 flex items-center justify-center text-xs font-bold text-white shrink-0">
-                  ${escapeHtml(getInitials(AppState.session.nama))}
+              ${AppState.session && AppState.session.isAuthenticated ? `
+                <div class="flex items-center gap-3">
+                  <div class="w-9 h-9 rounded-full bg-white/15 border border-white/20 flex items-center justify-center text-xs font-bold text-white shrink-0">
+                    ${escapeHtml(getInitials(AppState.session.nama))}
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs font-bold text-white truncate">${escapeHtml(AppState.session.nama)}</div>
+                    <div class="text-[11px] text-blue-200/80 truncate tabular-nums">${escapeHtml(AppState.session.email || AppState.session.nip)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onclick="${AppState.role === 'admin' ? 'App.exitAdminMode()' : 'App.logoutSession()'}"
+                    title="${AppState.role === 'admin' ? 'Keluar Mode Admin & Kunci Akses' : 'Keluar Akun'}"
+                    aria-label="${AppState.role === 'admin' ? 'Keluar Mode Admin' : 'Keluar Akun'}"
+                    class="p-2 rounded-lg text-blue-200 hover:text-white hover:bg-white/10 transition shrink-0"
+                  >
+                    <i data-lucide="log-out" class="w-4 h-4"></i>
+                  </button>
                 </div>
-                <div class="min-w-0 flex-1">
-                  <div class="text-xs font-bold text-white truncate">${escapeHtml(AppState.session.nama)}</div>
-                  <div class="text-[11px] text-blue-200/80 truncate tabular-nums">${escapeHtml(AppState.session.nip || AppState.session.email)}</div>
-                </div>
+              ` : `
                 <button
                   type="button"
-                  onclick="${AppState.role === 'admin' ? 'App.exitAdminMode()' : 'App.closeMobileDrawer(); App.openLoginModal();'}"
-                  title="${AppState.role === 'admin' ? 'Keluar Mode Admin & Kunci Akses' : 'Ganti Akun / Login NIP'}"
-                  aria-label="${AppState.role === 'admin' ? 'Keluar Mode Admin' : 'Ganti Akun atau Login NIP'}"
-                  class="p-2 rounded-lg text-blue-200 hover:text-white hover:bg-white/10 transition shrink-0"
+                  onclick="App.closeMobileDrawer(); App.openLoginModal();"
+                  class="w-full flex items-center gap-3 p-1.5 -m-1.5 rounded-xl hover:bg-white/10 transition text-left"
+                  title="Masuk dengan NIP Pegawai atau Email Internal"
                 >
-                  <i data-lucide="log-out" class="w-4 h-4"></i>
+                  <div class="w-9 h-9 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-blue-200 shrink-0">
+                    <i data-lucide="user" class="w-4 h-4"></i>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs font-bold text-white truncate">Belum Login</div>
+                    <div class="text-[11px] text-blue-200/80 truncate">Klik untuk Login NIP / Email</div>
+                  </div>
+                  <span class="p-2 rounded-lg text-sky-300 shrink-0">
+                    <i data-lucide="log-in" class="w-4 h-4"></i>
+                  </span>
                 </button>
-              </div>
+              `}
             </div>
           </div>
         `;
@@ -7195,8 +7201,8 @@
                   id="login-identifier"
                   type="text"
                   required
-                  value="${escapeHtml(AppState.session.email || AppState.session.nip || '')}"
-                  placeholder="ahmadrizal807@gmail.com atau NIP Pegawai"
+                  value=""
+                  placeholder="Contoh: ahmadrizal807@gmail.com"
                   class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:border-[#0B3B60] outline-none text-sm"
                 />
               </div>
@@ -7206,8 +7212,8 @@
                   id="login-name"
                   type="text"
                   required
-                  value="${escapeHtml(AppState.session.nama || '')}"
-                  placeholder="Nama Pegawai / Pengemudi"
+                  value=""
+                  placeholder="Contoh: Ahmad Rizal"
                   class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:border-[#0B3B60] outline-none text-sm"
                 />
               </div>
@@ -7222,7 +7228,7 @@
                 <div>
                   <label class="block text-xs font-bold text-slate-700 mb-1">Unit Kerja / Fungsi</label>
                   <select id="login-unit" class="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold">
-                    ${UNIT_KERJA_LIST.map((u) => `<option value="${escapeHtml(u)}" ${AppState.session.unit_kerja === u ? 'selected' : ''}>${escapeHtml(u)}</option>`).join('')}
+                    ${UNIT_KERJA_LIST.map((u) => `<option value="${escapeHtml(u)}" ${AppState.session.isAuthenticated && AppState.session.unit_kerja === u ? 'selected' : ''}>${escapeHtml(u)}</option>`).join('')}
                   </select>
                 </div>
               </div>
@@ -8718,9 +8724,9 @@
                 nama: adminName,
                 unit_kerja: adminUnit,
                 role: 'admin',
-                driver_id: null
+                driver_id: null,
+                isAuthenticated: true
               };
-              try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(AppState.session)); } catch (_) {}
 
               AppState.bookingForm.nama_peminjam = adminName;
               AppState.bookingForm.unit_kerja = normalizeUnitKerja(adminUnit, 'LOGISTIK');
@@ -8747,9 +8753,9 @@
             nama,
             unit_kerja,
             role: selectedRole,
-            driver_id: matchedDriver ? matchedDriver.id : null
+            driver_id: matchedDriver ? matchedDriver.id : null,
+            isAuthenticated: true
           };
-          localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(AppState.session));
           LoginHistory.record(Object.assign({ identifier }, AppState.session));
 
           AppState.bookingForm.nama_peminjam = nama;
@@ -8816,6 +8822,18 @@
           showToast('Akses Admin Dihapus', `${target.nama} (${target.identifier}) dihapus dari Daftar Admin Logistik.`, 'info');
         },
 
+        logoutSession() {
+          closeMobileDrawer();
+          const prevName = AppState.session && AppState.session.nama ? AppState.session.nama : '';
+          AppState.session = createEmptySession();
+          try { localStorage.removeItem(STORAGE_KEYS.SESSION); } catch (_) {}
+          AppState.bookingForm.nama_peminjam = '';
+          AppState.bookingForm.unit_kerja = '';
+          AppState.bookingForm.unitSearch = '';
+          renderAll();
+          showToast('Berhasil Keluar', prevName ? `Sesi ${prevName} telah diakhiri.` : 'Anda telah keluar dari akun.', 'info');
+        },
+
         quickLoginHistory(idx) {
           const list = LoginHistory.load();
           const acc = list[idx];
@@ -8827,9 +8845,9 @@
             nama: acc.nama,
             unit_kerja: normalizeUnitKerja(acc.unit_kerja, UNIT_KERJA_LIST[0]),
             role: acc.role,
-            driver_id: acc.driver_id || null
+            driver_id: acc.driver_id || null,
+            isAuthenticated: true
           };
-          localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(AppState.session));
           LoginHistory.record(acc);
 
           AppState.bookingForm.nama_peminjam = acc.nama;
@@ -8950,8 +8968,9 @@
         filterUnitDropdown(query) {
           AppState.bookingForm.unitSearch = query;
           AppState.bookingForm.unitDropdownOpen = true;
-          const exact = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === String(query || '').trim().toLowerCase());
-          if (exact) AppState.bookingForm.unit_kerja = exact;
+          const trimmed = String(query || '').trim();
+          const exact = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === trimmed.toLowerCase());
+          AppState.bookingForm.unit_kerja = exact || '';
           const list = document.getElementById('unit-kerja-dropdown-list');
           if (list) {
             list.innerHTML = renderUnitDropdownItems(query);
