@@ -344,7 +344,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.2</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -400,7 +400,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.8.2';
+      const APP_VERSION = 'v1.8.3';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -751,6 +751,40 @@
         if (!targetIso || !startIso) return false;
         const effEnd = endIso && endIso >= startIso ? endIso : startIso;
         return targetIso >= startIso && targetIso <= effEnd;
+      }
+
+      function getNowWibHHMM() {
+        const d = getNowWIB();
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+
+      function isStartDateTimeInPast(startIso, startTime) {
+        if (!startIso || !startTime) return false;
+        const today = getTodayWibISO();
+        const sDate = String(startIso).slice(0, 10);
+        if (sDate < today) return true;
+        if (sDate === today && String(startTime) < getNowWibHHMM()) return true;
+        return false;
+      }
+
+      function getSmartDefaultBookingSchedule() {
+        const today = getTodayWibISO();
+        const now = getNowWIB();
+        const nowMin = now.getHours() * 60 + now.getMinutes();
+        // Sebelum 08:30 WIB -> default hari ini 09:00 - 14:00
+        if (nowMin < 8 * 60 + 30) {
+          return { tanggal: today, tanggal_selesai: today, jam_mulai: '09:00', jam_selesai: '14:00' };
+        }
+        // 08:30 s/d 21:29 WIB -> bulatkan ke kelipatan 30 menit berikutnya (buffer min. 15 menit), durasi 2 jam
+        if (nowMin < 21 * 60 + 30) {
+          const startMin = Math.ceil((nowMin + 15) / 30) * 30;
+          const endMin = Math.min(23 * 60 + 45, startMin + 120);
+          const toHHMM = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+          return { tanggal: today, tanggal_selesai: today, jam_mulai: toHHMM(startMin), jam_selesai: toHHMM(endMin) };
+        }
+        // Sudah lewat 21:30 WIB -> otomatis jadwalkan besok pagi 08:00 - 14:00
+        const tomorrow = shiftDateISO(today, 1);
+        return { tanggal: tomorrow, tanggal_selesai: tomorrow, jam_mulai: '08:00', jam_selesai: '14:00' };
       }
 
       function isBookingTimeRangeValid(startIso, endIso, startTime, endTime) {
@@ -1945,6 +1979,8 @@
 
       const AdminRevealedDriverPins = new Set();
 
+      const INITIAL_BOOKING_SLOT = getSmartDefaultBookingSchedule();
+
       const AppState = {
         tabId: generateId('tab'),
         data: loadInitialState(),
@@ -1954,13 +1990,13 @@
         activeNav: 'beranda',
         selectedDriverId: '', // Diisi otomatis hanya dari localStorage key 'activeDriverId'
 
-        // Form state modul Pegawai (Pinjam Kendaraan — mendukung 1 hari & multi-hari)
+        // Form state modul Pegawai (Pinjam Kendaraan — mendukung 1 hari & multi-hari, anti waktu lampau)
         bookingForm: {
           step: 1,
-          tanggal: getTodayWibISO(),
-          tanggal_selesai: getTodayWibISO(),
-          jam_mulai: '09:00',
-          jam_selesai: '14:00',
+          tanggal: INITIAL_BOOKING_SLOT.tanggal,
+          tanggal_selesai: INITIAL_BOOKING_SLOT.tanggal_selesai,
+          jam_mulai: INITIAL_BOOKING_SLOT.jam_mulai,
+          jam_selesai: INITIAL_BOOKING_SLOT.jam_selesai,
           nama_peminjam: '',
           unit_kerja: 'Fungsi Data & Statistik Ekonomi (FDSEK)',
           unitSearch: 'Fungsi Data & Statistik Ekonomi (FDSEK)',
@@ -3520,7 +3556,9 @@
         if (bf.tanggal_selesai !== tglSelesai) bf.tanggal_selesai = tglSelesai;
         const dayCount = getBookingDayCount(bf.tanggal, tglSelesai);
         const isMultiDay = dayCount > 1;
-        const validTime = isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
+        const isPastStart = isStartDateTimeInPast(bf.tanggal, bf.jam_mulai);
+        const validRange = isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
+        const validTime = validRange && !isPastStart;
 
         // Evaluasi ketersediaan real-time berdasarkan rentang tanggal & jam
         const vehicleStatuses = AppState.data.vehicles.map((v) => ({
@@ -3676,10 +3714,10 @@
                         <button
                           type="button"
                           onclick="App.openBookingDatePicker('start')"
-                          class="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:border-[#0B3B60] focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-left flex items-center justify-between gap-2 transition group"
+                          class="w-full px-3 py-2.5 rounded-xl border ${bf.tanggal < getTodayWibISO() ? 'border-rose-400 bg-rose-50/40' : 'border-slate-300 bg-white hover:border-[#0B3B60]'} focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-left flex items-center justify-between gap-2 transition group"
                         >
-                          <span class="text-xs sm:text-sm font-bold text-slate-900 truncate">${escapeHtml(formatTanggalIndo(bf.tanggal, true))}</span>
-                          <span class="w-7 h-7 rounded-lg bg-slate-100 group-hover:bg-[#0B3B60]/10 text-slate-500 group-hover:text-[#0B3B60] flex items-center justify-center shrink-0 transition">
+                          <span class="text-xs sm:text-sm font-bold ${bf.tanggal < getTodayWibISO() ? 'text-rose-700' : 'text-slate-900'} truncate">${escapeHtml(formatTanggalIndo(bf.tanggal, true))}</span>
+                          <span class="w-7 h-7 rounded-lg ${bf.tanggal < getTodayWibISO() ? 'bg-rose-100 text-rose-600' : 'bg-slate-100 group-hover:bg-[#0B3B60]/10 text-slate-500 group-hover:text-[#0B3B60]'} flex items-center justify-center shrink-0 transition">
                             <i data-lucide="calendar" class="w-4 h-4"></i>
                           </span>
                         </button>
@@ -3689,10 +3727,10 @@
                         <button
                           type="button"
                           onclick="App.openAnalogClockPicker('jam_mulai')"
-                          class="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white hover:border-[#0B3B60] focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-left flex items-center justify-between gap-1.5 transition group"
+                          class="w-full px-3 py-2.5 rounded-xl border ${isPastStart ? 'border-rose-400 bg-rose-50/40' : 'border-slate-300 bg-white hover:border-[#0B3B60]'} focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-left flex items-center justify-between gap-1.5 transition group"
                         >
-                          <span class="text-sm font-extrabold text-slate-900 tabular-nums">${escapeHtml(bf.jam_mulai)} <span class="text-[11px] font-semibold text-slate-500">WIB</span></span>
-                          <span class="w-7 h-7 rounded-lg bg-[#EFF6FF] group-hover:bg-[#0B3B60] text-[#1D4ED8] group-hover:text-white flex items-center justify-center shrink-0 transition">
+                          <span class="text-sm font-extrabold ${isPastStart ? 'text-rose-700' : 'text-slate-900'} tabular-nums">${escapeHtml(bf.jam_mulai)} <span class="text-[11px] font-semibold text-slate-500">WIB</span></span>
+                          <span class="w-7 h-7 rounded-lg ${isPastStart ? 'bg-rose-100 text-rose-600' : 'bg-[#EFF6FF] group-hover:bg-[#0B3B60] text-[#1D4ED8] group-hover:text-white'} flex items-center justify-center shrink-0 transition">
                             <i data-lucide="clock" class="w-4 h-4"></i>
                           </span>
                         </button>
@@ -3750,9 +3788,17 @@
                 }">
                   <span class="inline-flex items-center gap-1.5">
                     <i data-lucide="${validTime ? 'timer' : 'alert-circle'}" class="w-4 h-4 shrink-0"></i>
-                    <span>${validTime ? `Total Durasi Dinas: ${escapeHtml(durationLabel)}` : 'Estimasi waktu kembali harus lebih besar dari waktu berangkat (WIB)'}</span>
+                    <span>${validTime
+                      ? `Total Durasi Dinas: ${escapeHtml(durationLabel)}`
+                      : isPastStart
+                        ? `Waktu berangkat sudah terlewat (sekarang ${escapeHtml(getNowWibHHMM())} WIB). Pilih jam setelahnya atau tanggal besok.`
+                        : 'Estimasi waktu kembali harus lebih besar dari waktu berangkat (WIB)'}</span>
                   </span>
-                  ${validTime ? `<span class="text-[11px] text-emerald-700/90">${escapeHtml(formatTanggalRangeIndo(bf.tanggal, tglSelesai, false))} · ${bf.jam_mulai}–${bf.jam_selesai} WIB</span>` : ''}
+                  ${validTime
+                    ? `<span class="text-[11px] text-emerald-700/90">${escapeHtml(formatTanggalRangeIndo(bf.tanggal, tglSelesai, false))} · ${bf.jam_mulai}–${bf.jam_selesai} WIB</span>`
+                    : isPastStart
+                      ? `<button type="button" onclick="App.applySmartDefaultSchedule()" class="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition shrink-0">Atur Jadwal Tersedia</button>`
+                      : ''}
                 </div>
 
                 <!-- Baris Identitas & Searchable Dropdown Unit Kerja -->
@@ -6066,6 +6112,7 @@
         selectedIso: '',
         startIso: '',
         endIso: '',
+        minIso: '', // Opsional: blokir pemilihan tanggal sebelum minIso
         phase: 'start', // 'start' | 'end' (khusus mode range)
         viewYear: 2026,
         viewMonth: 10, // 0-indexed (0=Jan .. 11=Des)
@@ -6074,10 +6121,11 @@
         onSelectRange: null
       };
 
-      function openDatePicker({ initialIso, startIso, endIso, mode = 'single', initialPhase = 'start', title, onSelect, onSelectRange }) {
+      function openDatePicker({ initialIso, startIso, endIso, minIso = '', mode = 'single', initialPhase = 'start', title, onSelect, onSelectRange }) {
         const isRange = mode === 'range';
         const today = getTodayWibISO();
-        const sIso = /^\d{4}-\d{2}-\d{2}$/.test((isRange ? startIso : initialIso) || '') ? (isRange ? startIso : initialIso) : today;
+        let sIso = /^\d{4}-\d{2}-\d{2}$/.test((isRange ? startIso : initialIso) || '') ? (isRange ? startIso : initialIso) : today;
+        if (minIso && sIso < minIso) sIso = minIso;
         let eIso = /^\d{4}-\d{2}-\d{2}$/.test(endIso || '') ? endIso : sIso;
         if (eIso < sIso) eIso = sIso;
 
@@ -6088,6 +6136,7 @@
         DatePickerState.selectedIso = sIso;
         DatePickerState.startIso = sIso;
         DatePickerState.endIso = eIso;
+        DatePickerState.minIso = minIso || '';
         DatePickerState.phase = initialPhase === 'end' ? 'end' : 'start';
         DatePickerState.viewYear = y;
         DatePickerState.viewMonth = m - 1;
@@ -6121,13 +6170,16 @@
         for (let d = 1; d <= daysInMonth; d++) {
           const iso = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
           const isToday = iso === todayIso;
+          const isDisabled = Boolean(DatePickerState.minIso && iso < DatePickerState.minIso);
           const dow = new Date(year, month, d).getDay();
           const isSunday = dow === 0;
 
           let cellCls = '';
           let showTodayDot = false;
 
-          if (isRange) {
+          if (isDisabled) {
+            cellCls = 'rounded-xl text-slate-300 line-through cursor-not-allowed bg-slate-50/50';
+          } else if (isRange) {
             const isStart = iso === startIso;
             const isEnd = iso === endIso;
             const isBetween = iso > startIso && iso < endIso;
@@ -6164,7 +6216,7 @@
           cells.push(`
             <button
               type="button"
-              onclick="App.pickCalendarDate('${iso}')"
+              ${isDisabled ? 'disabled' : `onclick="App.pickCalendarDate('${iso}')"`}
               class="h-10 w-full text-xs font-bold tabular-nums transition flex items-center justify-center relative ${cellCls}"
             >
               <span>${d}</span>
@@ -6309,7 +6361,8 @@
         mode: 'hour', // 'hour' | 'minute'
         isDragging: false,
         onSelect: null,
-        compareCtx: null // { startDate, endDate, startTime }
+        compareCtx: null, // { startDate, endDate, startTime }
+        allowPast: false
       };
 
       function openAnalogClockPicker(fieldName, customOpts = null) {
@@ -6327,18 +6380,31 @@
         ClockPickerState.isDragging = false;
         ClockPickerState.onSelect = (customOpts && typeof customOpts.onSelect === 'function') ? customOpts.onSelect : null;
         ClockPickerState.compareCtx = (customOpts && customOpts.compareCtx) ? customOpts.compareCtx : null;
+        ClockPickerState.allowPast = Boolean(customOpts && customOpts.allowPast);
         renderAnalogClockModal();
       }
 
-      function isClockPickerEndInvalid(formatted) {
-        if (ClockPickerState.field !== 'jam_selesai') return false;
+      function getClockPickerValidationError(formatted) {
         const ctx = ClockPickerState.compareCtx || {
           startDate: AppState.bookingForm.tanggal,
           endDate: AppState.bookingForm.tanggal_selesai || AppState.bookingForm.tanggal,
           startTime: AppState.bookingForm.jam_mulai
         };
-        const isSameDayClock = (ctx.endDate || ctx.startDate) <= ctx.startDate;
-        return isSameDayClock && formatted <= ctx.startTime;
+        if (ClockPickerState.field === 'jam_mulai' && !ClockPickerState.allowPast) {
+          if (isStartDateTimeInPast(ctx.startDate, formatted)) {
+            return `Jam berangkat sudah terlewat (sekarang ${getNowWibHHMM()} WIB). Pilih jam setelahnya atau ubah tanggal ke besok.`;
+          }
+        }
+        if (ClockPickerState.field === 'jam_selesai') {
+          const isSameDayClock = (ctx.endDate || ctx.startDate) <= ctx.startDate;
+          if (!ClockPickerState.allowPast && isStartDateTimeInPast(ctx.endDate || ctx.startDate, formatted)) {
+            return `Jam kembali sudah terlewat (sekarang ${getNowWibHHMM()} WIB).`;
+          }
+          if (isSameDayClock && formatted <= ctx.startTime) {
+            return `Estimasi Jam Kembali harus lebih besar dari Jam Berangkat (${ctx.startTime} WIB).`;
+          }
+        }
+        return '';
       }
 
       function buildClockTicksSvg() {
@@ -6460,13 +6526,12 @@
         const isHour = ClockPickerState.mode === 'hour';
         const geom = getAnalogClockGeometry();
 
-        // Cek validasi rentang jam jika memilih Estimasi Jam Kembali (hanya pada pemakaian 1 hari)
-        const warnInvalidEnd = isClockPickerEndInvalid(formatted);
-        const refStartTime = ClockPickerState.compareCtx ? ClockPickerState.compareCtx.startTime : AppState.bookingForm.jam_mulai;
+        // Cek validasi waktu lampau & rentang jam (WIB)
+        const clockValidationErr = getClockPickerValidationError(formatted);
 
         const hourPresets = ClockPickerState.field === 'jam_mulai'
-          ? ['07:30', '08:00', '09:00', '10:00', '13:00', '14:00']
-          : ['12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
+          ? ['08:00', '09:00', '10:00', '13:00', '16:00', '19:30', '20:00']
+          : ['12:00', '14:00', '16:00', '18:00', '20:00', '21:30', '22:00'];
 
         root.innerHTML = `
           <div class="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4 bg-slate-900/55 backdrop-blur-[2px]" onclick="if(event.target === this) App.closePicker()">
@@ -6562,17 +6627,23 @@
                 <div class="w-full mt-4">
                   ${isHour ? `
                     <div class="flex items-center justify-center flex-wrap gap-1.5">
-                      ${hourPresets.map((t) => `
-                        <button
-                          type="button"
-                          onclick="App.applyAnalogPresetTime('${t}')"
-                          class="px-2.5 py-1 rounded-lg border text-[11px] font-bold tabular-nums transition ${
-                            formatted === t
-                              ? 'bg-[#0B3B60] text-white border-[#0B3B60]'
-                              : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-[#0B3B60]'
-                          }"
-                        >${t}</button>
-                      `).join('')}
+                      ${hourPresets.map((t) => {
+                        const presetErr = getClockPickerValidationError(t);
+                        const presetDisabled = Boolean(presetErr && ClockPickerState.field === 'jam_mulai');
+                        return `
+                          <button
+                            type="button"
+                            ${presetDisabled ? 'disabled' : `onclick="App.applyAnalogPresetTime('${t}')"`}
+                            class="px-2.5 py-1 rounded-lg border text-[11px] font-bold tabular-nums transition ${
+                              presetDisabled
+                                ? 'bg-slate-100 text-slate-300 border-slate-200 line-through cursor-not-allowed'
+                                : formatted === t
+                                  ? 'bg-[#0B3B60] text-white border-[#0B3B60]'
+                                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-[#0B3B60]'
+                            }"
+                          >${t}</button>
+                        `;
+                      }).join('')}
                     </div>
                   ` : `
                     <div class="flex items-center justify-center gap-1.5 flex-wrap">
@@ -6593,9 +6664,9 @@
                   `}
                 </div>
 
-                <!-- Peringatan validasi jika jam kembali <= jam berangkat -->
-                <div id="clock-validation-msg" class="${warnInvalidEnd ? '' : 'hidden'} w-full mt-3 px-3 py-2 rounded-xl bg-rose-50 border border-rose-200 text-[11px] font-semibold text-rose-700 text-center tabular-nums">
-                  Estimasi Jam Kembali harus lebih besar dari Jam Berangkat (${escapeHtml(refStartTime)} WIB)
+                <!-- Peringatan validasi waktu lampau / jam kembali <= jam berangkat -->
+                <div id="clock-validation-msg" class="${clockValidationErr ? '' : 'hidden'} w-full mt-3 px-3 py-2 rounded-xl bg-rose-50 border border-rose-200 text-[11px] font-semibold text-rose-700 text-center tabular-nums">
+                  ${escapeHtml(clockValidationErr)}
                 </div>
 
                 <!-- Tombol Aksi -->
@@ -6606,8 +6677,13 @@
                   <button
                     id="clock-confirm-btn"
                     type="button"
+                    ${clockValidationErr ? 'disabled' : ''}
                     onclick="App.confirmAnalogClockTime()"
-                    class="flex-1 py-2.5 px-4 rounded-xl bg-[#0B3B60] hover:bg-[#072A45] text-white text-xs font-extrabold shadow-sm transition tabular-nums"
+                    class="flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold shadow-sm transition tabular-nums ${
+                      clockValidationErr
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                        : 'bg-[#0B3B60] hover:bg-[#072A45] text-white'
+                    }"
                   >
                     Terapkan (${formatted} WIB)
                   </button>
@@ -6655,12 +6731,22 @@
         const nums = document.getElementById('analog-clock-numbers');
         if (nums) nums.innerHTML = renderAnalogClockNumbersHtml();
 
+        const errMsg = getClockPickerValidationError(formatted);
         const confirmBtn = document.getElementById('clock-confirm-btn');
-        if (confirmBtn) confirmBtn.textContent = `Terapkan (${formatted} WIB)`;
+        if (confirmBtn) {
+          confirmBtn.textContent = `Terapkan (${formatted} WIB)`;
+          confirmBtn.disabled = Boolean(errMsg);
+          confirmBtn.className = `flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold shadow-sm transition tabular-nums ${
+            errMsg
+              ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+              : 'bg-[#0B3B60] hover:bg-[#072A45] text-white'
+          }`;
+        }
 
         const warnEl = document.getElementById('clock-validation-msg');
         if (warnEl) {
-          warnEl.classList.toggle('hidden', !isClockPickerEndInvalid(formatted));
+          warnEl.textContent = errMsg;
+          warnEl.classList.toggle('hidden', !errMsg);
         }
       }
 
@@ -7541,8 +7627,12 @@
 
         const tglSelesai = s.tanggal_selesai && s.tanggal_selesai >= s.tanggal ? s.tanggal_selesai : s.tanggal;
         const dayCount = getBookingDayCount(s.tanggal, tglSelesai);
-        const validTime = isBookingTimeRangeValid(s.tanggal, tglSelesai, s.jam_mulai, s.jam_selesai);
-        const durationText = calcDurationLabel(s.jam_mulai, s.jam_selesai, s.tanggal, tglSelesai);
+        const isPastStart = b.status !== 'ON_TRIP' && isStartDateTimeInPast(s.tanggal, s.jam_mulai);
+        const validRange = isBookingTimeRangeValid(s.tanggal, tglSelesai, s.jam_mulai, s.jam_selesai);
+        const validTime = validRange && !isPastStart;
+        const durationText = isPastStart
+          ? `Waktu sudah terlewat (${getNowWibHHMM()} WIB)`
+          : calcDurationLabel(s.jam_mulai, s.jam_selesai, s.tanggal, tglSelesai);
         const isRescheduleTab = s.tab === 'reschedule';
         const isAlreadyCancelled = b.status === 'CANCELLED';
 
@@ -7634,7 +7724,7 @@
                       `).join('')}
                     </div>
                     <span class="text-[11px] font-bold tabular-nums ${validTime ? 'text-emerald-700' : 'text-rose-600'}">
-                      ${validTime ? escapeHtml(durationText) : 'Waktu kembali tidak valid'}
+                      ${validTime ? escapeHtml(durationText) : escapeHtml(isPastStart ? durationText : 'Waktu kembali tidak valid')}
                     </span>
                   </div>
 
@@ -7645,10 +7735,10 @@
                       <button
                         type="button"
                         onclick="App.openAdminBookingDatePicker('start')"
-                        class="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-bold text-slate-900"
+                        class="w-full px-3 py-2 rounded-xl border ${b.status !== 'ON_TRIP' && s.tanggal < getTodayWibISO() ? 'border-rose-400 bg-rose-50 text-rose-700' : 'border-slate-300 bg-white text-slate-900'} hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-bold"
                       >
                         <span class="truncate">${escapeHtml(formatTanggalIndo(s.tanggal, false))}</span>
-                        <i data-lucide="calendar" class="w-3.5 h-3.5 text-[#0B3B60] shrink-0"></i>
+                        <i data-lucide="calendar" class="w-3.5 h-3.5 ${b.status !== 'ON_TRIP' && s.tanggal < getTodayWibISO() ? 'text-rose-600' : 'text-[#0B3B60]'} shrink-0"></i>
                       </button>
                     </div>
                     <div>
@@ -7667,10 +7757,10 @@
                       <button
                         type="button"
                         onclick="App.openAdminBookingClockPicker('jam_mulai')"
-                        class="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-extrabold text-slate-900 tabular-nums"
+                        class="w-full px-3 py-2 rounded-xl border ${isPastStart ? 'border-rose-400 bg-rose-50 text-rose-700' : 'border-slate-300 bg-white text-slate-900'} hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-extrabold tabular-nums"
                       >
                         <span>${escapeHtml(s.jam_mulai)} WIB</span>
-                        <i data-lucide="clock" class="w-3.5 h-3.5 text-[#1D4ED8] shrink-0"></i>
+                        <i data-lucide="clock" class="w-3.5 h-3.5 ${isPastStart ? 'text-rose-600' : 'text-[#1D4ED8]'} shrink-0"></i>
                       </button>
                     </div>
                     <div>
@@ -7678,10 +7768,10 @@
                       <button
                         type="button"
                         onclick="App.openAdminBookingClockPicker('jam_selesai')"
-                        class="w-full px-3 py-2 rounded-xl border ${validTime ? 'border-slate-300 bg-white' : 'border-rose-400 bg-rose-50'} hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-extrabold ${validTime ? 'text-slate-900' : 'text-rose-700'} tabular-nums"
+                        class="w-full px-3 py-2 rounded-xl border ${validRange ? 'border-slate-300 bg-white text-slate-900' : 'border-rose-400 bg-rose-50 text-rose-700'} hover:border-[#0B3B60] text-left flex items-center justify-between gap-2 text-xs font-extrabold tabular-nums"
                       >
                         <span>${escapeHtml(s.jam_selesai)} WIB</span>
-                        <i data-lucide="clock" class="w-3.5 h-3.5 ${validTime ? 'text-[#1D4ED8]' : 'text-rose-600'} shrink-0"></i>
+                        <i data-lucide="clock" class="w-3.5 h-3.5 ${validRange ? 'text-[#1D4ED8]' : 'text-rose-600'} shrink-0"></i>
                       </button>
                     </div>
                   </div>
@@ -8288,11 +8378,22 @@
             mode: 'range',
             startIso: curStart,
             endIso: curEnd,
+            minIso: getTodayWibISO(),
             initialPhase: focusTarget === 'end' ? 'end' : 'start',
             title: titleMap[focusTarget] || 'Pilih Rentang Tanggal Pemakaian',
             onSelectRange(startIso, endIso) {
               AppState.bookingForm.tanggal = startIso;
               AppState.bookingForm.tanggal_selesai = endIso >= startIso ? endIso : startIso;
+              // Jika pindah ke hari ini dan jam berangkat saat ini sudah terlewat, otomatis geser ke slot terdekat
+              if (isStartDateTimeInPast(AppState.bookingForm.tanggal, AppState.bookingForm.jam_mulai)) {
+                const smart = getSmartDefaultBookingSchedule();
+                if (smart.tanggal === AppState.bookingForm.tanggal) {
+                  AppState.bookingForm.jam_mulai = smart.jam_mulai;
+                  if (AppState.bookingForm.tanggal_selesai === AppState.bookingForm.tanggal && AppState.bookingForm.jam_selesai <= smart.jam_mulai) {
+                    AppState.bookingForm.jam_selesai = smart.jam_selesai;
+                  }
+                }
+              }
               renderAll();
             }
           });
@@ -8348,6 +8449,7 @@
         },
 
         pickCalendarDate(iso) {
+          if (DatePickerState.minIso && iso < DatePickerState.minIso) return;
           if (DatePickerState.mode === 'range') {
             if (DatePickerState.phase === 'start' || !DatePickerState.startIso) {
               DatePickerState.startIso = iso;
@@ -8436,6 +8538,11 @@
 
         confirmAnalogClockTime() {
           const val = `${String(ClockPickerState.hour).padStart(2, '0')}:${String(ClockPickerState.minute).padStart(2, '0')}`;
+          const errMsg = getClockPickerValidationError(val);
+          if (errMsg) {
+            showToast('Waktu Tidak Valid', errMsg, 'warning');
+            return;
+          }
           const field = ClockPickerState.field;
           const customCb = ClockPickerState.onSelect;
           closePicker();
@@ -8444,6 +8551,16 @@
             return;
           }
           AppState.bookingForm[field] = val;
+          // Jika jam berangkat digeser melewati jam kembali pada hari yang sama, otomatis geser jam kembali (+2 jam)
+          if (field === 'jam_mulai') {
+            const effEnd = AppState.bookingForm.tanggal_selesai || AppState.bookingForm.tanggal;
+            if (effEnd <= AppState.bookingForm.tanggal && AppState.bookingForm.jam_selesai <= val) {
+              const [sh, sm] = val.split(':').map(Number);
+              const nextEndMin = Math.min(23 * 60 + 59, sh * 60 + sm + 120);
+              const nextEndStr = `${String(Math.floor(nextEndMin / 60)).padStart(2, '0')}:${String(nextEndMin % 60).padStart(2, '0')}`;
+              if (nextEndStr > val) AppState.bookingForm.jam_selesai = nextEndStr;
+            }
+          }
           renderAll();
         },
 
@@ -8715,29 +8832,59 @@
           showToast('Riwayat Dibersihkan', 'Seluruh riwayat login cepat telah dihapus.', 'info');
         },
 
-        // --- PEGAWAI: BOOKING ANTI-BENTROK (1 HARI & MULTI-HARI) ---
+        // --- PEGAWAI: BOOKING ANTI-BENTROK (1 HARI & MULTI-HARI, ANTI WAKTU LAMPAU) ---
+        applySmartDefaultSchedule() {
+          const slot = getSmartDefaultBookingSchedule();
+          AppState.bookingForm.tanggal = slot.tanggal;
+          AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
+          AppState.bookingForm.jam_mulai = slot.jam_mulai;
+          AppState.bookingForm.jam_selesai = slot.jam_selesai;
+          renderAll();
+          showToast('Jadwal Disesuaikan', `Diatur ke ${formatTanggalIndo(slot.tanggal, false)} pukul ${slot.jam_mulai}–${slot.jam_selesai} WIB.`, 'info');
+        },
+
         startNewBooking() {
-          const today = getTodayWibISO();
+          const slot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
           AppState.bookingForm.vehicle_id = '';
           AppState.bookingForm.driver_id = '';
-          AppState.bookingForm.tanggal = today;
-          AppState.bookingForm.tanggal_selesai = today;
+          AppState.bookingForm.tanggal = slot.tanggal;
+          AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
+          AppState.bookingForm.jam_mulai = slot.jam_mulai;
+          AppState.bookingForm.jam_selesai = slot.jam_selesai;
           switchRole('pegawai', 'pinjam');
         },
 
         quickBookVehicle(vehicleId) {
-          const today = getTodayWibISO();
+          const slot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
           AppState.bookingForm.vehicle_id = vehicleId;
-          AppState.bookingForm.tanggal = today;
-          AppState.bookingForm.tanggal_selesai = today;
+          AppState.bookingForm.tanggal = slot.tanggal;
+          AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
+          AppState.bookingForm.jam_mulai = slot.jam_mulai;
+          AppState.bookingForm.jam_selesai = slot.jam_selesai;
           switchRole('pegawai', 'pinjam');
           const v = getVehicleById(vehicleId);
           if (v) showToast('Armada Dipilih', `${v.plat_nomor} (${v.jenis_mobil}) ditandai. Lengkapi waktu & tujuan dinas.`, 'info');
         },
 
         setBookingStep(stepNum) {
+          if (stepNum > 1) {
+            const bf = AppState.bookingForm;
+            const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
+            if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
+              showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Pilih jam berangkat setelahnya atau ubah tanggal ke besok.`, 'warning');
+              bf.step = 1;
+              renderAll();
+              return;
+            }
+            if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
+              showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
+              bf.step = 1;
+              renderAll();
+              return;
+            }
+          }
           AppState.bookingForm.step = stepNum;
           renderAll();
         },
@@ -8804,6 +8951,10 @@
           const bf = AppState.bookingForm;
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
           bf.tanggal_selesai = tglSelesai;
+          if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
+            showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Pilih jam berangkat setelahnya atau ubah tanggal ke besok.`, 'warning');
+            return;
+          }
           if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
             showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
             return;
@@ -8846,6 +8997,13 @@
             return;
           }
 
+          if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
+            showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Peminjaman tidak dapat diajukan untuk waktu yang telah lewat.`, 'error');
+            AppState.bookingForm.step = 1;
+            renderAll();
+            return;
+          }
+
           if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
             showToast('Periksa Waktu Pemakaian', 'Tanggal & jam kembali harus lebih besar dari waktu berangkat.', 'warning');
             return;
@@ -8885,10 +9043,13 @@
           };
 
           AppState.data.bookings.unshift(newBooking);
-          // Reset wizard selections
+          // Reset wizard selections ke slot jadwal mendatang yang valid
+          const nextSlot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
-          AppState.bookingForm.tanggal = getTodayWibISO();
-          AppState.bookingForm.tanggal_selesai = getTodayWibISO();
+          AppState.bookingForm.tanggal = nextSlot.tanggal;
+          AppState.bookingForm.tanggal_selesai = nextSlot.tanggal_selesai;
+          AppState.bookingForm.jam_mulai = nextSlot.jam_mulai;
+          AppState.bookingForm.jam_selesai = nextSlot.jam_selesai;
           AppState.bookingForm.tujuan = '';
           AppState.bookingForm.keperluan = '';
           AppState.bookingForm.selectedChip = '';
@@ -9208,6 +9369,7 @@
         },
 
         openAdminBookingDatePicker(focusTarget = 'range') {
+          const b = getBookingById(AdminBookingModalState.bookingId);
           const curStart = AdminBookingModalState.tanggal || getTodayWibISO();
           const curEnd = AdminBookingModalState.tanggal_selesai && AdminBookingModalState.tanggal_selesai >= curStart
             ? AdminBookingModalState.tanggal_selesai
@@ -9216,11 +9378,21 @@
             mode: 'range',
             startIso: curStart,
             endIso: curEnd,
+            minIso: b && b.status === 'ON_TRIP' ? '' : getTodayWibISO(),
             initialPhase: focusTarget === 'end' ? 'end' : 'start',
             title: focusTarget === 'end' ? 'Reschedule Tanggal Kembali' : 'Reschedule Tanggal Berangkat',
             onSelectRange(startIso, endIso) {
               AdminBookingModalState.tanggal = startIso;
               AdminBookingModalState.tanggal_selesai = endIso >= startIso ? endIso : startIso;
+              if ((!b || b.status !== 'ON_TRIP') && isStartDateTimeInPast(AdminBookingModalState.tanggal, AdminBookingModalState.jam_mulai)) {
+                const smart = getSmartDefaultBookingSchedule();
+                if (smart.tanggal === AdminBookingModalState.tanggal) {
+                  AdminBookingModalState.jam_mulai = smart.jam_mulai;
+                  if (AdminBookingModalState.tanggal_selesai === AdminBookingModalState.tanggal && AdminBookingModalState.jam_selesai <= smart.jam_mulai) {
+                    AdminBookingModalState.jam_selesai = smart.jam_selesai;
+                  }
+                }
+              }
               refreshAdminBookingModalInPlace();
             }
           });
@@ -9228,9 +9400,11 @@
 
         openAdminBookingClockPicker(fieldName) {
           const s = AdminBookingModalState;
+          const b = getBookingById(s.bookingId);
           openAnalogClockPicker(fieldName, {
             initialTime: s[fieldName] || (fieldName === 'jam_mulai' ? '09:00' : '14:00'),
             title: fieldName === 'jam_mulai' ? 'Reschedule Jam Berangkat (WIB)' : 'Reschedule Jam Kembali (WIB)',
+            allowPast: Boolean(b && b.status === 'ON_TRIP'),
             compareCtx: {
               startDate: s.tanggal,
               endDate: s.tanggal_selesai || s.tanggal,
@@ -9250,6 +9424,10 @@
           if (!b || b.status === 'COMPLETED') return;
 
           const tglSelesai = s.tanggal_selesai && s.tanggal_selesai >= s.tanggal ? s.tanggal_selesai : s.tanggal;
+          if (b.status !== 'ON_TRIP' && isStartDateTimeInPast(s.tanggal, s.jam_mulai)) {
+            showToast('Waktu Sudah Terlewat', `Jadwal reschedule tidak boleh sebelum pukul ${getNowWibHHMM()} WIB hari ini.`, 'warning');
+            return;
+          }
           if (!isBookingTimeRangeValid(s.tanggal, tglSelesai, s.jam_mulai, s.jam_selesai)) {
             showToast('Periksa Waktu Jadwal', 'Tanggal & jam kembali harus lebih besar dari waktu berangkat (WIB).', 'warning');
             return;
