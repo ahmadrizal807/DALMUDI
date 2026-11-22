@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.4</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.10.3';
+      const APP_VERSION = 'v1.10.4';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -434,7 +434,9 @@
         ADMIN_LIST: 'bi_fleet_jateng_admin_list_v1',
         ADMIN_PIN_HASH: 'bi_fleet_jateng_admin_pin_hash_v1',
         ADMIN_UNLOCKED: 'bi_fleet_jateng_admin_unlocked_v1',
-        LOGIN_HISTORY: 'bi_fleet_jateng_login_history_v1'
+        LOGIN_HISTORY: 'bi_fleet_jateng_login_history_v1',
+        LAST_ROLE: 'bi_fleet_jateng_last_role_v1',
+        LAST_DRIVER_NAV: 'bi_fleet_jateng_last_driver_nav_v1'
       };
 
       const BROADCAST_CHANNEL_NAME = 'bi_fleet_jateng_realtime_v1';
@@ -2628,6 +2630,7 @@
           try {
             localStorage.removeItem(this.STORAGE_KEY);
           } catch (_) {}
+          clearSavedDriverView();
           AppState.selectedDriverId = '';
           AppState.expenseForm.booking_id = '';
           AppState.expenseForm.vehicle_id = '';
@@ -2699,13 +2702,61 @@
         }
       };
 
-      // Mode default saat aplikasi pertama dibuka selalu role "Pegawai" tanpa auto-login
-      AppState.role = 'pegawai';
-      AppState.activeNav = ROLE_NAVS_DEFAULT_NAV('pegawai');
+      const DRIVER_NAV_IDS = ['tugas', 'bbm_etoll', 'riwayat', 'profil_driver'];
+
+      function saveLastActiveRole(role, driverNav = null) {
+        try {
+          // Hanya simpan preferensi tab 'driver' atau 'pegawai' (Admin TIDAK pernah dipersist saat refresh)
+          if (role === 'driver') {
+            localStorage.setItem(STORAGE_KEYS.LAST_ROLE, 'driver');
+            if (driverNav && DRIVER_NAV_IDS.includes(driverNav)) {
+              localStorage.setItem(STORAGE_KEYS.LAST_DRIVER_NAV, driverNav);
+            }
+          } else if (role === 'pegawai') {
+            localStorage.setItem(STORAGE_KEYS.LAST_ROLE, 'pegawai');
+          }
+        } catch (_) {}
+      }
+
+      function clearSavedDriverView() {
+        try {
+          localStorage.setItem(STORAGE_KEYS.LAST_ROLE, 'pegawai');
+          localStorage.removeItem(STORAGE_KEYS.LAST_DRIVER_NAV);
+        } catch (_) {}
+      }
+
+      function resolveInitialRoleAndNav() {
+        const activeDriverId = DriverAuth.getActiveDriverId();
+        let savedRole = '';
+        let savedDriverNav = '';
+        try {
+          savedRole = String(localStorage.getItem(STORAGE_KEYS.LAST_ROLE) || '').trim();
+          savedDriverNav = String(localStorage.getItem(STORAGE_KEYS.LAST_DRIVER_NAV) || '').trim();
+        } catch (_) {}
+
+        // Pertahankan tetap di Tab Driver (dan sub-tab terakhirnya) saat refresh bila sesi Driver aktif
+        if (activeDriverId && (savedRole === 'driver' || (!savedRole && !AppState.session.isAuthenticated))) {
+          const validNav = DRIVER_NAV_IDS.includes(savedDriverNav) ? savedDriverNav : ROLE_NAVS_DEFAULT_NAV('driver');
+          saveLastActiveRole('driver', validNav);
+          return { role: 'driver', nav: validNav, driverId: activeDriverId };
+        }
+
+        // Default aman selalu role "Pegawai" (Admin tidak pernah auto-restore saat refresh)
+        return {
+          role: 'pegawai',
+          nav: ROLE_NAVS_DEFAULT_NAV('pegawai'),
+          driverId: activeDriverId
+        };
+      }
+
+      // Inisialisasi role & tab awal: pertahankan Tab Driver jika pengemudi sedang login di Tab Driver, selain itu default Pegawai
+      const INITIAL_VIEW_STATE = resolveInitialRoleAndNav();
+      AppState.role = INITIAL_VIEW_STATE.role;
+      AppState.activeNav = INITIAL_VIEW_STATE.nav;
       AppState.bookingForm.nama_peminjam = AppState.session.isAuthenticated ? (AppState.session.nama || '') : '';
       AppState.bookingForm.unit_kerja = AppState.session.isAuthenticated ? normalizeUnitKerja(AppState.session.unit_kerja, '') : '';
       AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
-      AppState.selectedDriverId = DriverAuth.getActiveDriverId();
+      AppState.selectedDriverId = INITIAL_VIEW_STATE.driverId;
 
       function ROLE_NAVS_DEFAULT_NAV(role) {
         if (role === 'driver') return 'tugas';
@@ -3352,6 +3403,11 @@
         AppState.role = newRole;
         const navs = ROLE_NAVS[newRole];
         AppState.activeNav = targetNav && navs.some((n) => n.id === targetNav) ? targetNav : navs[0].id;
+        if (newRole === 'driver') {
+          saveLastActiveRole('driver', AppState.activeNav);
+        } else if (newRole === 'pegawai') {
+          saveLastActiveRole('pegawai');
+        }
         renderAll();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
@@ -3365,6 +3421,7 @@
         AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
         AppState.role = 'pegawai';
         AppState.activeNav = 'pinjam';
+        saveLastActiveRole('pegawai');
         renderAll();
         window.scrollTo({ top: 0, behavior: 'smooth' });
         showToast('Mode Pegawai Sementara', 'Anda dapat mengajukan peminjaman kendaraan. Klik "Kembali ke Admin" kapan saja.', 'info');
@@ -3388,6 +3445,7 @@
         closeMobileDrawer();
         AppState.role = 'pegawai';
         AppState.activeNav = ROLE_NAVS.pegawai[0].id;
+        saveLastActiveRole('pegawai');
         // Pastikan session tersimpan tidak mengembalikan role admin maupun auto-login
         if (AppState.session && AppState.session.role === 'admin') {
           AppState.session = createEmptySession();
@@ -3469,6 +3527,9 @@
       function switchNav(navId) {
         closeMobileDrawer();
         AppState.activeNav = navId;
+        if (AppState.role === 'driver') {
+          saveLastActiveRole('driver', navId);
+        }
         renderAll();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
@@ -9440,6 +9501,7 @@
             AppState.role = 'driver';
             const navs = ROLE_NAVS.driver;
             AppState.activeNav = targetNav && navs.some((n) => n.id === targetNav) ? targetNav : navs[0].id;
+            saveLastActiveRole('driver', AppState.activeNav);
             renderAll();
             window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
@@ -9488,6 +9550,7 @@
           AppState.role = 'driver';
           const navs = ROLE_NAVS.driver;
           AppState.activeNav = targetNav && navs.some((n) => n.id === targetNav) ? targetNav : navs[0].id;
+          saveLastActiveRole('driver', AppState.activeNav);
           renderAll();
           window.scrollTo({ top: 0, behavior: 'smooth' });
           showToast('Cockpit Pengemudi Aktif', `Selamat bertugas, ${res.driver.nama} (${res.driver.nip_pegawai}). Sesi tersimpan otomatis.`, 'success');
@@ -9497,6 +9560,7 @@
           const prev = DriverAuth.getActiveDriver();
           DriverAlertManager.dismiss();
           DriverAuth.logout();
+          clearSavedDriverView();
           AppState.role = 'pegawai';
           AppState.activeNav = ROLE_NAVS.pegawai[0].id;
           renderAll();
@@ -9508,6 +9572,7 @@
           DriverAlertManager.dismiss();
           if (AppState.role === 'driver' && AppState.activeNav !== 'tugas') {
             AppState.activeNav = 'tugas';
+            saveLastActiveRole('driver', 'tugas');
           }
           renderAll();
           const targetEl = document.getElementById('driver-active-tasks-section');
