@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.1</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.2</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.10.1';
+      const APP_VERSION = 'v1.10.2';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -1884,9 +1884,12 @@
             showToast('Status Armada Diperbarui', `Kendaraan ${msg.meta?.plat_nomor || ''} mulai beroperasi (Sedang Dinas).`, 'info');
           } else if (msg.eventType === 'COMPLETE_TRIP') {
             showToast('Perjalanan Selesai', `Tugas ${msg.meta?.kode_booking || ''} selesai. Odometer & status diperbarui.`, 'success');
-            // Trigger otomatis modal rating jika pengguna berada di peran Pegawai
+            // Trigger otomatis modal rating hanya jika perjalanan tersebut milik akun Pegawai yang sedang login
             if (AppState.role === 'pegawai' && msg.meta?.booking_id) {
-              setTimeout(() => openRatingModal(msg.meta.booking_id), 350);
+              const completedBkg = getBookingById(msg.meta.booking_id);
+              if (completedBkg && isBookingOwnedByCurrentSession(completedBkg)) {
+                setTimeout(() => openRatingModal(msg.meta.booking_id), 350);
+              }
             }
           } else if (msg.eventType === 'SUBMIT_RATING') {
             showToast('Rating Pengemudi Masuk', `Penilaian bintang ${msg.meta?.rating || 5}★ telah diperbarui secara live.`, 'success');
@@ -2879,8 +2882,20 @@
         return { available: true, reason: 'Tersedia', badgeType: 'AVAILABLE', conflictBooking: null };
       }
 
+      function isBookingOwnedByCurrentSession(b) {
+        const sess = AppState.session;
+        if (!b || !sess || !sess.isAuthenticated || !String(sess.nama || '').trim()) return false;
+        const sessName = String(sess.nama).trim().toLowerCase();
+        const bookingName = String(b.nama_peminjam || '').trim().toLowerCase();
+        if (!bookingName || bookingName !== sessName) return false;
+        const ownerId = String(b.peminjam_id || '').trim().toLowerCase();
+        const sessId = String(sess.email || sess.nip || '').trim().toLowerCase();
+        if (ownerId && sessId && ownerId !== sessId) return false;
+        return true;
+      }
+
       function getPendingRatingBookings() {
-        return AppState.data.bookings.filter((b) => b.status === 'COMPLETED' && !b.rating);
+        return AppState.data.bookings.filter((b) => b.status === 'COMPLETED' && !b.rating && isBookingOwnedByCurrentSession(b));
       }
 
       function getMonthlyKPIs() {
@@ -4893,9 +4908,13 @@
         }).join('');
       }
 
-      /** Halaman Perjalanan Saya + Status Menunggu Rating */
+      /** Halaman Perjalanan Saya + Status Menunggu Rating (Terfilter Khusus Akun Pegawai Aktif) */
       function renderPegawaiTrips() {
-        const sorted = [...AppState.data.bookings].sort((a, b) => {
+        const isLoggedIn = Boolean(AppState.session && AppState.session.isAuthenticated && String(AppState.session.nama || '').trim());
+        const myBookings = isLoggedIn
+          ? AppState.data.bookings.filter((b) => isBookingOwnedByCurrentSession(b))
+          : [];
+        const sorted = [...myBookings].sort((a, b) => {
           // Urutkan: Menunggu Rating & ON_TRIP & ACTIVE paling atas, CANCELLED paling bawah
           const score = (x) => (x.status === 'COMPLETED' && !x.rating ? 0 : x.status === 'ON_TRIP' ? 1 : x.status === 'ACTIVE' ? 2 : x.status === 'COMPLETED' ? 3 : 4);
           return score(a) - score(b) || String(b.tanggal).localeCompare(String(a.tanggal));
@@ -4906,7 +4925,11 @@
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 class="text-lg font-extrabold text-[#0B3B60]">Daftar Perjalanan &amp; Penilaian Pengemudi</h2>
-                <p class="text-xs text-slate-500">Pantau status penjemputan secara live dan berikan rating setelah perjalanan selesai.</p>
+                <p class="text-xs text-slate-500">
+                  ${isLoggedIn
+                    ? `Menampilkan riwayat peminjaman &amp; penilaian khusus akun <strong>${escapeHtml(AppState.session.nama)}</strong> (${escapeHtml(AppState.session.email || AppState.session.nip)}).`
+                    : 'Login dengan NIP / Email untuk melihat riwayat peminjaman &amp; memberikan penilaian pengemudi.'}
+                </p>
               </div>
               <button
                 onclick="App.startNewBooking()"
@@ -4918,12 +4941,28 @@
             </div>
 
             <div class="space-y-4">
-              ${sorted.length === 0 ? `
+              ${!isLoggedIn ? `
+                <div class="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-card">
+                  <div class="w-12 h-12 rounded-2xl bg-[#EFF6FF] text-[#0B3B60] flex items-center justify-center mx-auto mb-3">
+                    <i data-lucide="key-round" class="w-6 h-6"></i>
+                  </div>
+                  <div class="text-sm font-extrabold text-slate-800">Masuk untuk Melihat Perjalanan Saya</div>
+                  <p class="text-xs text-slate-500 mt-1 max-w-md mx-auto">Riwayat peminjaman bersifat khusus per akun pegawai. Silakan login menggunakan NIP atau Email internal Anda terlebih dahulu.</p>
+                  <button
+                    type="button"
+                    onclick="App.openLoginModal()"
+                    class="mt-4 inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#0B3B60] hover:bg-[#072A45] text-white text-xs font-bold shadow-sm transition"
+                  >
+                    <i data-lucide="log-in" class="w-4 h-4"></i>
+                    <span>Login NIP / Email</span>
+                  </button>
+                </div>
+              ` : sorted.length === 0 ? `
                 <div class="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-card">
                   <div class="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
                     <i data-lucide="clipboard-list" class="w-6 h-6"></i>
                   </div>
-                  <div class="text-sm font-extrabold text-slate-800">Belum Ada Riwayat Perjalanan Dinas</div>
+                  <div class="text-sm font-extrabold text-slate-800">Belum Ada Riwayat Perjalanan untuk ${escapeHtml(AppState.session.nama)}</div>
                   <p class="text-xs text-slate-500 mt-1">Ajukan peminjaman kendaraan dinas melalui tombol <strong>Booking Baru</strong> di atas.</p>
                 </div>
               ` : sorted.map((b) => {
@@ -9965,6 +10004,7 @@
               id: generateId('bkg'),
               kode_booking: generateNextBookingCode(bf.tanggal),
               nama_peminjam: bf.nama_peminjam.trim(),
+              peminjam_id: AppState.session && AppState.session.isAuthenticated ? String(AppState.session.email || AppState.session.nip || '').trim() : '',
               unit_kerja: bf.unit_kerja.trim(),
               tujuan: bf.tujuan.trim(),
               keperluan: keperluanText,
