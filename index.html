@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.9.2</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.9.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.9.2';
+      const APP_VERSION = 'v1.9.3';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -1632,6 +1632,7 @@
         _hasLoggedFirstAutoPull: false,
         lastSyncClock: '',
         lastPullTimestamp: 0,
+        _lastRepairMap: {},
         knownBookingIds: new Set(),
         hasInitializedKnownBookings: false,
 
@@ -1694,6 +1695,7 @@
               try {
                 const parsed = JSON.parse(e.newValue);
                 if (parsed && parsed.updated_at !== AppState.data.updated_at) {
+                  sanitizeStateData(parsed);
                   AppState.data = parsed;
                   renderAll();
                 }
@@ -2011,6 +2013,7 @@
               }
 
               let pulledSomething = false;
+              let repairedFromPull = { healedVehicles: [], healedDrivers: [] };
               const hasCoreData = (Array.isArray(json.data.vehicles) && json.data.vehicles.length > 0) ||
                                   (Array.isArray(json.data.drivers) && json.data.drivers.length > 0) ||
                                   (Array.isArray(json.data.bookings) && json.data.bookings.length > 0);
@@ -2025,6 +2028,7 @@
                   services: Array.isArray(json.data.services) ? json.data.services : []
                 };
                 migrateLegacyDriversIfNeeded(AppState.data);
+                repairedFromPull = reconcileAllStateStatuses(AppState.data);
                 sanitizeStateData(AppState.data);
                 pulledSomething = true;
               }
@@ -2096,6 +2100,12 @@
               if (newlyDetectedForDriver.length > 0) {
                 DriverAlertManager.notifyNewBookings(newlyDetectedForDriver);
               }
+
+              // Self-healing write-back: jika Google Sheets memiliki status ON_TRIP/ON_DUTY yatim (tanpa booking aktif),
+              // otomatis perbaiki baris armada/driver tersebut di Google Sheets agar konsisten di seluruh perangkat.
+              if (repairedFromPull.healedVehicles.length > 0 || repairedFromPull.healedDrivers.length > 0) {
+                this.repairDriftedStatusesInGAS(repairedFromPull.healedVehicles, repairedFromPull.healedDrivers);
+              }
             } else {
               throw new Error(json.message || 'Gagal membaca data');
             }
@@ -2103,6 +2113,40 @@
             if (!silent) showToast('Gagal Menarik Data', err.message, 'error');
           } finally {
             this.isPulling = false;
+          }
+        },
+
+        repairDriftedStatusesInGAS(healedVehicles = [], healedDrivers = []) {
+          if (!this.hasGasUrl()) return;
+          const now = Date.now();
+          const COOLDOWN_MS = 15000;
+          const repairedLabels = [];
+
+          healedVehicles.forEach((v) => {
+            if (!v || !v.id) return;
+            const key = `veh:${v.id}:${v.status}`;
+            if (now - (this._lastRepairMap[key] || 0) < COOLDOWN_MS) return;
+            this._lastRepairMap[key] = now;
+            repairedLabels.push(`${v.plat_nomor || v.id}→${v.status}`);
+            this.postToGAS('UPSERT_VEHICLE', v);
+          });
+
+          healedDrivers.forEach((d) => {
+            if (!d || !d.id) return;
+            const key = `drv:${d.id}:${d.status}`;
+            if (now - (this._lastRepairMap[key] || 0) < COOLDOWN_MS) return;
+            this._lastRepairMap[key] = now;
+            repairedLabels.push(`${d.nama || d.id}→${d.status}`);
+            this.postToGAS('UPSERT_DRIVER', d);
+          });
+
+          if (repairedLabels.length > 0) {
+            this.addSyncLog({
+              target: 'Auto-Repair Status',
+              action: 'RECONCILE',
+              status: 'DIPERBAIKI',
+              detail: `Status tidak sinkron dipulihkan: ${repairedLabels.join(', ')}`
+            });
           }
         },
 
@@ -2235,6 +2279,50 @@
         return `${prefix}${String(maxSeq + 1).padStart(3, '0')}`;
       }
 
+      /**
+       * Rekonsiliasi Otomatis Status Armada & Pengemudi (Single Source of Truth = Booking_Kendaraan).
+       * Mencegah status armada terjebak di ON_TRIP ("Sedang Dinas") atau pengemudi terjebak di ON_DUTY
+       * padahal tidak ada jadwal ON_TRIP yang sedang berlangsung (mis. akibat hapus manual di Sheets atau putus jaringan).
+       * Status manual bengkel (MAINTENANCE) dan driver libur (OFF) selalu dipertahankan.
+       */
+      function reconcileAllStateStatuses(stateObj) {
+        const result = { changed: false, healedVehicles: [], healedDrivers: [] };
+        if (!stateObj || typeof stateObj !== 'object') return result;
+
+        const bookings = Array.isArray(stateObj.bookings) ? stateObj.bookings : [];
+        const onTripVehicleIds = new Set();
+        const onTripDriverIds = new Set();
+
+        bookings.forEach((b) => {
+          if (b && b.status === 'ON_TRIP') {
+            if (b.vehicle_id) onTripVehicleIds.add(String(b.vehicle_id));
+            if (b.driver_id) onTripDriverIds.add(String(b.driver_id));
+          }
+        });
+
+        (Array.isArray(stateObj.vehicles) ? stateObj.vehicles : []).forEach((v) => {
+          if (!v || v.status === 'MAINTENANCE') return;
+          const expected = onTripVehicleIds.has(String(v.id)) ? 'ON_TRIP' : 'READY';
+          if (v.status !== expected) {
+            v.status = expected;
+            result.changed = true;
+            result.healedVehicles.push(v);
+          }
+        });
+
+        (Array.isArray(stateObj.drivers) ? stateObj.drivers : []).forEach((d) => {
+          if (!d || d.status === 'OFF') return;
+          const expected = onTripDriverIds.has(String(d.id)) ? 'ON_DUTY' : 'AVAILABLE';
+          if (d.status !== expected) {
+            d.status = expected;
+            result.changed = true;
+            result.healedDrivers.push(d);
+          }
+        });
+
+        return result;
+      }
+
       function sanitizeStateData(stateObj) {
         if (!stateObj || typeof stateObj !== 'object') return false;
         let changed = false;
@@ -2317,6 +2405,11 @@
           const kmSrv = Number(s.km_service);
           if (!isFinite(kmSrv) || kmSrv < 0) { s.km_service = 0; changed = true; }
         });
+
+        // 5. Rekonsiliasi Otomatis Status Armada & Pengemudi (Self-Healing Anti-Stuck ON_TRIP / ON_DUTY)
+        if (reconcileAllStateStatuses(stateObj).changed) {
+          changed = true;
+        }
 
         return changed;
       }
@@ -2685,14 +2778,6 @@
             ? `Sedang Dinas (${timeText})`
             : `Terjadwal (${timeText})`;
           return { available: false, reason: label, badgeType: conflict.status === 'ON_TRIP' ? 'ON_TRIP' : 'BOOKED', conflictBooking: conflict };
-        }
-
-        // Jika rentang mencakup hari ini dan kendaraan sedang ON_TRIP tanpa booking tercatat
-        if (isDateWithinRange(getTodayWibISO(), tanggalMulai, effEnd) && vehicle.status === 'ON_TRIP') {
-          const activeTrip = AppState.data.bookings.find((b) => b.vehicle_id === vehicle.id && b.status === 'ON_TRIP');
-          if (!activeTrip) {
-            return { available: false, reason: 'Sedang Dinas', badgeType: 'ON_TRIP', conflictBooking: null };
-          }
         }
 
         return { available: true, reason: 'Tersedia', badgeType: 'READY', conflictBooking: null };
@@ -9312,93 +9397,6 @@
           AppState.bookingForm.vehicle_id = vehicleId;
           AppState.bookingForm.tanggal = slot.tanggal;
           AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
-          AppState.bookingForm.jam_mulai = slot.jam_mulai;
-          AppState.bookingForm.jam_selesai = slot.jam_selesai;
-          switchRole('pegawai', 'pinjam');
-          const v = getVehicleById(vehicleId);
-          if (v) showToast('Armada Dipilih', `${v.plat_nomor} (${v.jenis_mobil}) ditandai. Lengkapi waktu & tujuan dinas.`, 'info');
-        },
-
-        setBookingStep(stepNum) {
-          if (stepNum > 1) {
-            const bf = AppState.bookingForm;
-            const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
-            if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
-              showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Pilih jam berangkat setelahnya atau ubah tanggal ke besok.`, 'warning');
-              bf.step = 1;
-              renderAll();
-              return;
-            }
-            if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
-              showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
-              bf.step = 1;
-              renderAll();
-              return;
-            }
-          }
-          AppState.bookingForm.step = stepNum;
-          renderAll();
-        },
-
-        updateBookingField(key, val, shouldRender) {
-          AppState.bookingForm[key] = val;
-          if (shouldRender) renderAll();
-        },
-
-        openUnitDropdown() {
-          AppState.bookingForm.unitDropdownOpen = true;
-          const list = document.getElementById('unit-kerja-dropdown-list');
-          if (list) {
-            list.innerHTML = renderUnitDropdownItems(AppState.bookingForm.unitSearch);
-            list.classList.remove('hidden');
-          }
-        },
-
-        toggleUnitDropdown() {
-          const list = document.getElementById('unit-kerja-dropdown-list');
-          if (!list) return;
-          const willOpen = list.classList.contains('hidden');
-          AppState.bookingForm.unitDropdownOpen = willOpen;
-          if (willOpen) {
-            list.innerHTML = renderUnitDropdownItems('');
-            list.classList.remove('hidden');
-          } else {
-            list.classList.add('hidden');
-          }
-        },
-
-        filterUnitDropdown(query) {
-          AppState.bookingForm.unitSearch = query;
-          AppState.bookingForm.unitDropdownOpen = true;
-          const trimmed = String(query || '').trim();
-          const exact = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === trimmed.toLowerCase());
-          AppState.bookingForm.unit_kerja = exact || '';
-          const list = document.getElementById('unit-kerja-dropdown-list');
-          if (list) {
-            list.innerHTML = renderUnitDropdownItems(query);
-            list.classList.remove('hidden');
-          }
-        },
-
-        selectUnitKerja(unitName) {
-          AppState.bookingForm.unit_kerja = unitName;
-          AppState.bookingForm.unitSearch = unitName;
-          AppState.bookingForm.unitDropdownOpen = false;
-          const input = document.getElementById('unit-kerja-search-input');
-          const list = document.getElementById('unit-kerja-dropdown-list');
-          if (input) input.value = unitName;
-          if (list) list.classList.add('hidden');
-        },
-
-        applyTujuanPreset(idx) {
-          const chip = TUJUAN_PRESET_CHIPS[idx];
-          if (!chip) return;
-          AppState.bookingForm.selectedChip = chip.label;
-          AppState.bookingForm.tujuan = chip.tujuan;
-          AppState.bookingForm.keperluan = chip.keperluan;
-          renderAll();
-        },
-
         goToBookingStep2() {
           const bf = AppState.bookingForm;
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
@@ -9570,6 +9568,11 @@
             showToast('Akses Ditolak', 'Perjalanan ini bukan jadwal milik akun pengemudi yang aktif.', 'error');
             return;
           }
+          if (b.status === 'COMPLETED' || b.status === 'CANCELLED') {
+            closeModal();
+            renderAll();
+            return;
+          }
           const v = getVehicleById(b.vehicle_id);
           const d = activeDriver;
 
@@ -9588,15 +9591,15 @@
           let triggeredServiceAlert = false;
           if (v) {
             v.odometer_saat_ini = Math.max(v.odometer_saat_ini, kmAkhir);
-            if (v.status !== 'MAINTENANCE') v.status = 'READY';
             triggeredServiceAlert = getVehicleServiceHealth(v).needsService;
           }
 
           if (d) {
-            const stillOnTrip = AppState.data.bookings.some((x) => x.driver_id === d.id && x.status === 'ON_TRIP');
-            if (!stillOnTrip && d.status !== 'OFF') d.status = 'AVAILABLE';
             d.total_trip = (Number(d.total_trip) || 0) + 1;
           }
+
+          // Rekonsiliasi status kendaraan & driver secara atomik dari Booking_Kendaraan
+          reconcileFleetAndDriverStatuses([b.vehicle_id], [b.driver_id]);
 
           SyncEngine.persistAndBroadcast('COMPLETE_TRIP', { booking_id: b.id, kode_booking: b.kode_booking });
           SyncEngine.postToGAS('COMPLETE_TRIP', {
