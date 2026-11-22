@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.2</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.10.2';
+      const APP_VERSION = 'v1.10.3';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -2882,6 +2882,25 @@
         return { available: true, reason: 'Tersedia', badgeType: 'AVAILABLE', conflictBooking: null };
       }
 
+      let PendingPostLoginAction = null;
+
+      function isSessionAuthenticated() {
+        return Boolean(
+          AppState.session &&
+          AppState.session.isAuthenticated === true &&
+          String(AppState.session.nama || '').trim().length >= 2 &&
+          String(AppState.session.email || AppState.session.nip || '').trim().length >= 2
+        );
+      }
+
+      function getAuthenticatedBookingIdentity() {
+        if (!isSessionAuthenticated()) return null;
+        const nama = String(AppState.session.nama || '').trim();
+        const unit_kerja = normalizeUnitKerja(AppState.session.unit_kerja, UNIT_KERJA_LIST[0]);
+        const peminjam_id = String(AppState.session.email || AppState.session.nip || '').trim();
+        return { nama, unit_kerja, peminjam_id };
+      }
+
       function isBookingOwnedByCurrentSession(b) {
         const sess = AppState.session;
         if (!b || !sess || !sess.isAuthenticated || !String(sess.nama || '').trim()) return false;
@@ -4118,9 +4137,50 @@
         `;
       }
 
-      /** Modul 4.1: Wizard Peminjaman Kendaraan Anti-Bentrok (3 Langkah — 1 Hari & Multi-Hari) */
+      /** Modul 4.1: Wizard Peminjaman Kendaraan Anti-Bentrok (Wajib Login — Identitas Terkunci Sesuai Akun) */
       function renderPegawaiBookingWizard() {
+        const authId = getAuthenticatedBookingIdentity();
+        if (!authId) {
+          return `
+            <div class="max-w-lg mx-auto my-4 sm:my-6 bg-white rounded-2xl border border-slate-200 shadow-sport overflow-hidden">
+              <div class="h-1.5 w-full sport-tri-stripe"></div>
+              <div class="sport-carbon p-6 text-white text-center">
+                <div class="w-14 h-14 rounded-2xl bg-sky-500/20 border border-sky-400/35 text-sky-300 flex items-center justify-center mx-auto mb-3">
+                  <i data-lucide="shield-alert" class="w-7 h-7"></i>
+                </div>
+                <div class="text-[10px] font-sport font-bold uppercase tracking-widest text-sky-300">Akses Pengajuan Terproteksi</div>
+                <h2 class="text-lg font-extrabold mt-1">Login Wajib Sebelum Pinjam Mobil</h2>
+                <p class="text-xs text-blue-200/85 mt-1.5 leading-relaxed">
+                  Demi ketertiban administrasi kendaraan dinas KPwBI Jateng, pengajuan peminjaman hanya dapat dilakukan setelah masuk dengan <strong>NIP Pegawai / Email Internal</strong>. Nama Peminjam dan Unit Kerja akan terisi otomatis &amp; terkunci sesuai akun Anda.
+                </p>
+              </div>
+              <div class="p-5 flex flex-col gap-2.5">
+                <button
+                  type="button"
+                  onclick="App.openLoginForBooking()"
+                  class="sport-ignition-btn w-full py-3 px-4 rounded-xl bg-gradient-to-r from-[#0B3B60] via-[#1D4ED8] to-[#0284C7] text-white font-sport font-bold uppercase tracking-wider text-xs sm:text-sm flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98]"
+                >
+                  <i data-lucide="key-round" class="w-4 h-4"></i>
+                  <span>Login NIP / Email Sekarang</span>
+                </button>
+                <button
+                  type="button"
+                  onclick="App.switchNav('beranda')"
+                  class="w-full py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold transition"
+                >
+                  Kembali ke Beranda
+                </button>
+              </div>
+            </div>
+          `;
+        }
+
         const bf = AppState.bookingForm;
+        // Kunci Nama Peminjam & Unit Kerja selalu sinkron dengan akun yang sedang login (anti input asal-asalan)
+        bf.nama_peminjam = authId.nama;
+        bf.unit_kerja = authId.unit_kerja;
+        bf.unitSearch = authId.unit_kerja;
+        bf.unitDropdownOpen = false;
         const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
         if (bf.tanggal_selesai !== tglSelesai) bf.tanggal_selesai = tglSelesai;
         const dayCount = getBookingDayCount(bf.tanggal, tglSelesai);
@@ -4403,47 +4463,41 @@
                       : ''}
                 </div>
 
-                <!-- Baris Identitas & Searchable Dropdown Unit Kerja -->
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label class="block text-xs font-bold text-slate-700 mb-1.5">Nama Peminjam (Pegawai)</label>
-                    <input
-                      type="text"
-                      value="${escapeHtml(bf.nama_peminjam)}"
-                      oninput="App.updateBookingField('nama_peminjam', this.value, false)"
-                      placeholder="Masukkan nama lengkap pegawai..."
-                      class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-sm"
-                    />
-                  </div>
-
-                  <!-- Searchable Dropdown Unit Kerja KPwBI Jateng -->
-                  <div class="relative">
-                    <label class="block text-xs font-bold text-slate-700 mb-1.5">Unit Kerja / Fungsi KPwBI Jateng</label>
-                    <div class="relative">
-                      <input
-                        id="unit-kerja-search-input"
-                        type="text"
-                        value="${escapeHtml(bf.unitSearch)}"
-                        onfocus="App.openUnitDropdown()"
-                        oninput="App.filterUnitDropdown(this.value)"
-                        placeholder="Ketik untuk mencari Fungsi / Unit Kerja..."
-                        autocomplete="off"
-                        class="w-full pl-3.5 pr-10 py-2.5 rounded-xl border border-slate-300 focus:border-[#0B3B60] focus:ring-2 focus:ring-[#0B3B60]/15 outline-none text-sm"
-                      />
-                      <button
-                        type="button"
-                        onclick="App.toggleUnitDropdown()"
-                        class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1"
-                        aria-label="Buka daftar Unit Kerja"
-                      >
-                        <i data-lucide="chevrons-up-down" class="w-4 h-4"></i>
-                      </button>
-                    </div>
-                    <div
-                      id="unit-kerja-dropdown-list"
-                      class="${bf.unitDropdownOpen ? '' : 'hidden'} absolute z-30 mt-1.5 w-full bg-white rounded-xl border border-slate-200 shadow-soft max-h-60 overflow-y-auto py-1"
+                <!-- Baris Identitas Peminjam Terverifikasi (Terkunci Sesuai Akun Login) -->
+                <div class="rounded-xl border border-blue-200/80 bg-[#EFF6FF]/45 p-3.5 sm:p-4 space-y-3">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#0B3B60]">
+                      <i data-lucide="badge-check" class="w-4 h-4 text-[#1D4ED8] shrink-0"></i>
+                      <span>Identitas Peminjam Terverifikasi (Terkunci Sesuai Akun Login)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onclick="App.openLoginForBooking()"
+                      class="text-[11px] font-bold text-[#1D4ED8] hover:underline"
                     >
-                      ${renderUnitDropdownItems(bf.unitSearch)}
+                      Ganti Akun
+                    </button>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label class="block text-[11px] font-bold text-slate-600 mb-1">Nama Peminjam (Pegawai)</label>
+                      <div class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white/90 text-sm font-bold text-slate-900 flex items-center justify-between gap-2">
+                        <span class="truncate">${escapeHtml(authId.nama)}</span>
+                        <span class="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-400 shrink-0 tabular-nums">
+                          <i data-lucide="lock" class="w-3 h-3"></i>
+                          <span class="max-w-[140px] truncate">${escapeHtml(authId.peminjam_id)}</span>
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <label class="block text-[11px] font-bold text-slate-600 mb-1">Unit Kerja / Fungsi KPwBI Jateng</label>
+                      <div class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white/90 text-sm font-bold text-[#0B3B60] flex items-center justify-between gap-2">
+                        <span class="truncate">${escapeHtml(authId.unit_kerja)}</span>
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[10px] font-bold text-emerald-700 shrink-0">
+                          <i data-lucide="lock" class="w-3 h-3"></i>
+                          <span>Terkunci</span>
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -9537,6 +9591,13 @@
             return;
           }
 
+          // Validasi identitas login non-admin agar tidak kosong / asal-asalan
+          if (identifier.length < 3 || nama.length < 2) {
+            showToast('Data Login Tidak Valid', 'Masukkan NIP/Email minimal 3 karakter dan Nama Lengkap minimal 2 karakter.', 'warning');
+            return;
+          }
+          const validUnit = normalizeUnitKerja(unit_kerja, UNIT_KERJA_LIST[0]);
+
           // Bukan admin -> jalankan login normal sebagai Pegawai atau Driver sesuai dropdown
           const matchedDriver = AppState.data.drivers.find((d) =>
             d.nip_pegawai.toLowerCase() === identifier.toLowerCase() ||
@@ -9547,7 +9608,7 @@
             nip: identifier.includes('@') ? 'BI-INT-2026' : identifier,
             email: identifier.includes('@') ? identifier : `${nama.toLowerCase().replace(/\s+/g, '.')}@bi.go.id`,
             nama,
-            unit_kerja,
+            unit_kerja: validUnit,
             role: selectedRole,
             driver_id: matchedDriver ? matchedDriver.id : null,
             isAuthenticated: true
@@ -9556,16 +9617,27 @@
           LoginHistory.record(Object.assign({ identifier }, AppState.session));
 
           AppState.bookingForm.nama_peminjam = nama;
-          AppState.bookingForm.unit_kerja = unit_kerja;
-          AppState.bookingForm.unitSearch = unit_kerja;
+          AppState.bookingForm.unit_kerja = validUnit;
+          AppState.bookingForm.unitSearch = validUnit;
+
+          const pendingAction = PendingPostLoginAction;
+          PendingPostLoginAction = null;
 
           closeModal();
           if (selectedRole === 'driver') {
             App.openDriverPortalFor(matchedDriver ? matchedDriver.id : '');
             return;
           }
-          switchRole(selectedRole);
-          showToast('Berhasil Masuk', `Selamat datang, ${nama} (${ROLE_META[selectedRole].label}).`, 'success');
+          if (pendingAction && pendingAction.nav === 'pinjam') {
+            if (pendingAction.vehicleId) {
+              App.quickBookVehicle(pendingAction.vehicleId);
+            } else {
+              App.startNewBooking();
+            }
+          } else {
+            switchRole(selectedRole);
+          }
+          showToast('Berhasil Masuk', `Selamat datang, ${nama} — ${validUnit} (${ROLE_META[selectedRole].label}).`, 'success');
         },
 
         // --- MANAJEMEN DAFTAR ADMIN LOGISTIK (Master_Admin) ---
@@ -9651,13 +9723,24 @@
           AppState.bookingForm.nama_peminjam = acc.nama;
           AppState.bookingForm.unit_kerja = AppState.session.unit_kerja;
           AppState.bookingForm.unitSearch = AppState.session.unit_kerja;
+          const pendingAction = PendingPostLoginAction;
+          PendingPostLoginAction = null;
+
           closeModal();
           if (acc.role === 'driver') {
             App.openDriverPortalFor(acc.driver_id || '');
             return;
           }
-          switchRole(acc.role);
-          showToast('Login Cepat Berhasil', `Masuk sebagai ${acc.nama} (${AppState.session.nip}).`, 'success');
+          if (pendingAction && pendingAction.nav === 'pinjam') {
+            if (pendingAction.vehicleId) {
+              App.quickBookVehicle(pendingAction.vehicleId);
+            } else {
+              App.startNewBooking();
+            }
+          } else {
+            switchRole(acc.role);
+          }
+          showToast('Login Cepat Berhasil', `Masuk sebagai ${acc.nama} — ${AppState.session.unit_kerja}.`, 'success');
         },
 
         removeLoginHistoryItem(idx) {
@@ -9690,9 +9773,24 @@
           showToast('Jadwal Disesuaikan', `Diatur ke ${formatTanggalIndo(slot.tanggal, false)} pukul ${slot.jam_mulai}–${slot.jam_selesai} WIB.`, 'info');
         },
 
+        openLoginForBooking(vehicleId = '') {
+          PendingPostLoginAction = { nav: 'pinjam', vehicleId: vehicleId || '' };
+          openLoginModal();
+        },
+
         startNewBooking() {
+          if (!isSessionAuthenticated()) {
+            PendingPostLoginAction = { nav: 'pinjam', vehicleId: '' };
+            showToast('Login Diperlukan', 'Silakan login dengan NIP / Email terlebih dahulu sebelum mengajukan peminjaman kendaraan.', 'warning');
+            openLoginModal();
+            return;
+          }
+          const authId = getAuthenticatedBookingIdentity();
           const slot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
+          AppState.bookingForm.nama_peminjam = authId.nama;
+          AppState.bookingForm.unit_kerja = authId.unit_kerja;
+          AppState.bookingForm.unitSearch = authId.unit_kerja;
           AppState.bookingForm.vehicle_id = '';
           AppState.bookingForm.driver_id = '';
           AppState.bookingForm.vehicle_ids = [];
@@ -9706,8 +9804,18 @@
         },
 
         quickBookVehicle(vehicleId) {
+          if (!isSessionAuthenticated()) {
+            PendingPostLoginAction = { nav: 'pinjam', vehicleId: vehicleId || '' };
+            showToast('Login Diperlukan', 'Silakan login dengan NIP / Email terlebih dahulu untuk meminjam armada ini.', 'warning');
+            openLoginModal();
+            return;
+          }
+          const authId = getAuthenticatedBookingIdentity();
           const slot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
+          AppState.bookingForm.nama_peminjam = authId.nama;
+          AppState.bookingForm.unit_kerja = authId.unit_kerja;
+          AppState.bookingForm.unitSearch = authId.unit_kerja;
           AppState.bookingForm.vehicle_id = vehicleId;
           AppState.bookingForm.vehicle_ids = vehicleId ? [vehicleId] : [];
           AppState.bookingForm.driver_id = '';
@@ -9723,6 +9831,12 @@
         },
 
         setBookingStep(stepNum) {
+          if (!isSessionAuthenticated()) {
+            PendingPostLoginAction = { nav: 'pinjam', vehicleId: '' };
+            showToast('Login Diperlukan', 'Silakan login dengan NIP / Email terlebih dahulu.', 'warning');
+            openLoginModal();
+            return;
+          }
           if (stepNum > 1) {
             const bf = AppState.bookingForm;
             const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
@@ -9803,7 +9917,17 @@
         },
 
         goToBookingStep2() {
+          const authId = getAuthenticatedBookingIdentity();
+          if (!authId) {
+            PendingPostLoginAction = { nav: 'pinjam', vehicleId: '' };
+            showToast('Login Diperlukan', 'Silakan login dengan NIP / Email terlebih dahulu untuk mengajukan peminjaman.', 'warning');
+            openLoginModal();
+            return;
+          }
           const bf = AppState.bookingForm;
+          bf.nama_peminjam = authId.nama;
+          bf.unit_kerja = authId.unit_kerja;
+          bf.unitSearch = authId.unit_kerja;
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
           bf.tanggal_selesai = tglSelesai;
           if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
@@ -9814,8 +9938,8 @@
             showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
             return;
           }
-          if (!bf.nama_peminjam.trim() || !bf.unit_kerja.trim() || !bf.tujuan.trim()) {
-            showToast('Lengkapi Detail Dinas', 'Nama Peminjam, Unit Kerja KPwBI Jateng, dan Tujuan Dinas wajib diisi.', 'warning');
+          if (!bf.tujuan.trim()) {
+            showToast('Lengkapi Detail Dinas', 'Tujuan Dinas wajib diisi.', 'warning');
             return;
           }
           bf.step = 2;
@@ -9939,7 +10063,17 @@
         },
 
         submitBooking() {
+          const authId = getAuthenticatedBookingIdentity();
+          if (!authId) {
+            PendingPostLoginAction = { nav: 'pinjam', vehicleId: '' };
+            showToast('Login Diperlukan', 'Pengajuan ditolak. Anda wajib login dengan NIP / Email terlebih dahulu.', 'error');
+            openLoginModal();
+            return;
+          }
           const bf = AppState.bookingForm;
+          bf.nama_peminjam = authId.nama;
+          bf.unit_kerja = authId.unit_kerja;
+          bf.unitSearch = authId.unit_kerja;
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
           const vehIds = Array.isArray(bf.vehicle_ids) && bf.vehicle_ids.length > 0
             ? [...new Set(bf.vehicle_ids)]
@@ -10003,9 +10137,9 @@
             const newBooking = {
               id: generateId('bkg'),
               kode_booking: generateNextBookingCode(bf.tanggal),
-              nama_peminjam: bf.nama_peminjam.trim(),
-              peminjam_id: AppState.session && AppState.session.isAuthenticated ? String(AppState.session.email || AppState.session.nip || '').trim() : '',
-              unit_kerja: bf.unit_kerja.trim(),
+              nama_peminjam: authId.nama,
+              peminjam_id: authId.peminjam_id,
+              unit_kerja: authId.unit_kerja,
               tujuan: bf.tujuan.trim(),
               keperluan: keperluanText,
               tanggal: bf.tanggal,
