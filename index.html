@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.9.0</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.9.1</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.9.0';
+      const APP_VERSION = 'v1.9.1';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -1623,6 +1623,9 @@
         config: null,
         syncLogs: [],
         isPulling: false,
+        pendingWrites: 0,
+        mutationVersion: 0,
+        lastWriteCompletedAt: 0,
         pollTimerId: null,
         _lifecycleBound: false,
         _pendingSilentRender: false,
@@ -1687,6 +1690,7 @@
           // Fallback listener localStorage untuk browser/konteks tertentu
           window.addEventListener('storage', (e) => {
             if (e.key === STORAGE_KEYS.STATE && e.newValue) {
+              if (this.pendingWrites > 0 || (this.lastWriteCompletedAt > 0 && (Date.now() - this.lastWriteCompletedAt) < 3500)) return;
               try {
                 const parsed = JSON.parse(e.newValue);
                 if (parsed && parsed.updated_at !== AppState.data.updated_at) {
@@ -1806,6 +1810,9 @@
         },
 
         persistAndBroadcast(eventType, meta = {}) {
+          if (eventType !== 'SYNC_PULL') {
+            this.mutationVersion++;
+          }
           AppState.data.updated_at = Date.now();
           try {
             localStorage.setItem(STORAGE_KEYS.STATE, JSON.stringify(AppState.data));
@@ -1831,6 +1838,9 @@
         },
 
         handleIncomingSync(msg) {
+          if (msg.eventType === 'SYNC_PULL' && (this.pendingWrites > 0 || (this.lastWriteCompletedAt > 0 && (Date.now() - this.lastWriteCompletedAt) < 3500))) {
+            return;
+          }
           const activeDriverId = DriverAuth.getActiveDriverId();
           const newlyForDriver = [];
 
@@ -1899,12 +1909,15 @@
             return { skipped: true };
           }
 
+          this.mutationVersion++;
+          this.pendingWrites++;
           const url = this.config.GOOGLE_APPS_SCRIPT_URL.trim();
           try {
             const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-              body: JSON.stringify({ action, payload })
+              body: JSON.stringify({ action, payload }),
+              cache: 'no-store'
             });
             const data = await resp.json();
             if (data.status === 'success') {
@@ -1925,6 +1938,9 @@
               detail: err.message || 'Koneksi GAS gagal'
             });
             return { error: err.message };
+          } finally {
+            this.pendingWrites = Math.max(0, this.pendingWrites - 1);
+            this.lastWriteCompletedAt = Date.now();
           }
         },
 
@@ -1963,18 +1979,28 @@
 
         async pullFromGAS(silent = false) {
           if (this.isPulling) return;
+          // Jangan menimpa aksi tulis yang sedang berjalan / baru selesai dikirim ke Google Sheets
+          if (silent && (this.pendingWrites > 0 || (this.lastWriteCompletedAt > 0 && (Date.now() - this.lastWriteCompletedAt) < 3500))) {
+            return;
+          }
           if (!this.hasGasUrl()) {
             if (!silent) showToast('URL GAS Kosong', 'Isi URL Web App GAS untuk menarik data dari Google Sheets.', 'warning');
             return;
           }
           this.isPulling = true;
           this.lastPullTimestamp = Date.now();
+          const pullStartMutationVersion = this.mutationVersion;
           const url = this.config.GOOGLE_APPS_SCRIPT_URL.trim();
           const sep = url.includes('?') ? '&' : '?';
           try {
             if (!silent) showToast('Sinkronisasi', 'Mengambil data terbaru dari Google Sheets...', 'info');
             const resp = await fetch(`${url}${sep}action=getAll&t=${Date.now()}`, { cache: 'no-store' });
             const json = await resp.json();
+            // Jika ada aksi lokal (mis. Mulai/Selesaikan Perjalanan) saat GET sedang in-flight,
+            // abaikan snapshot lama ini agar tombol & status UI tidak mental kembali ke status lama!
+            if (this.pendingWrites > 0 || this.mutationVersion !== pullStartMutationVersion) {
+              return;
+            }
             if (json.status === 'success' && json.data) {
               // Simpan daftar ID booking & sidik jari state sebelum AppState.data diperbarui
               const prevSignature = this.computeDataSignature(AppState.data, AppState.adminList);
@@ -5033,7 +5059,11 @@
                         </div>
                         <div class="flex items-center gap-2">
                           ${v ? renderIndoPlate(v.plat_nomor, v.masa_berlaku_plat) : ''}
-                          <button onclick="App.startTrip('${t.id}')" class="px-3 py-2 rounded-lg bg-[#0B3B60] text-white text-xs font-bold">Mulai</button>
+                          ${t.status === 'ON_TRIP' ? `
+                            <button onclick="App.openCompleteTripModal('${t.id}')" class="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold">Selesaikan</button>
+                          ` : `
+                            <button onclick="App.startTrip('${t.id}')" class="px-3 py-2 rounded-lg bg-[#0B3B60] hover:bg-[#072A45] text-white text-xs font-bold">Mulai</button>
+                          `}
                         </div>
                       </div>
                     `;
@@ -9369,48 +9399,6 @@
           renderAll();
         },
 
-        goToBookingStep2() {
-          const bf = AppState.bookingForm;
-          const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
-          bf.tanggal_selesai = tglSelesai;
-          if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
-            showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Pilih jam berangkat setelahnya atau ubah tanggal ke besok.`, 'warning');
-            return;
-          }
-          if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
-            showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
-            return;
-          }
-          if (!bf.nama_peminjam.trim() || !bf.unit_kerja.trim() || !bf.tujuan.trim()) {
-            showToast('Lengkapi Detail Dinas', 'Nama Peminjam, Unit Kerja KPwBI Jateng, dan Tujuan Dinas wajib diisi.', 'warning');
-            return;
-          }
-          bf.step = 2;
-          renderAll();
-        },
-
-        selectBookingVehicle(vehicleId) {
-          AppState.bookingForm.vehicle_id = vehicleId;
-          renderAll();
-        },
-
-        goToBookingStep3() {
-          if (!AppState.bookingForm.vehicle_id) {
-            showToast('Pilih Armada', 'Silakan pilih salah satu kendaraan yang tersedia terlebih dahulu.', 'warning');
-            return;
-          }
-          AppState.bookingForm.step = 3;
-          renderAll();
-        },
-
-        selectBookingDriver(driverId) {
-          AppState.bookingForm.driver_id = driverId;
-          renderAll();
-        },
-
-        submitBooking() {
-          const bf = AppState.bookingForm;
-          const veh = getVehicleById(bf.vehicle_id);
           const drv = getDriverById(bf.driver_id);
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
 
@@ -9498,6 +9486,10 @@
             showToast('Akses Ditolak', 'Perjalanan ini bukan jadwal milik akun pengemudi yang aktif.', 'error');
             return;
           }
+          if (b.status === 'ON_TRIP' || b.status === 'COMPLETED' || b.status === 'CANCELLED') {
+            renderAll();
+            return;
+          }
           const v = getVehicleById(b.vehicle_id);
           const d = activeDriver;
 
@@ -9508,7 +9500,12 @@
           if (v) v.status = 'ON_TRIP';
           if (d) d.status = 'ON_DUTY';
 
+          DriverAlertManager.dismiss();
+          // Kunci epoch mutasi lokal SEBELUM render & POST agar silent poll in-flight tidak menimpa status ON_TRIP
           SyncEngine.persistAndBroadcast('START_TRIP', { booking_id: b.id, plat_nomor: v?.plat_nomor || '' });
+          renderAll();
+          showToast('Perjalanan Dimulai', `${v ? v.plat_nomor : 'Armada'} berstatus Sedang Dinas oleh ${activeDriver.nama} sejak ${b.waktu_mulai_aktual}.`, 'success');
+
           SyncEngine.postToGAS('START_TRIP', {
             booking_id: b.id,
             vehicle_id: b.vehicle_id,
@@ -9516,9 +9513,6 @@
             km_awal: b.km_awal,
             waktu_mulai_aktual: b.waktu_mulai_aktual
           });
-
-          renderAll();
-          showToast('Perjalanan Dimulai', `${v ? v.plat_nomor : 'Armada'} berstatus Sedang Dinas oleh ${activeDriver.nama} sejak ${b.waktu_mulai_aktual}.`, 'success');
         },
 
         confirmCompleteTrip(e, bookingId) {
