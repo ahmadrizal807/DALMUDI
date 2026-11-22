@@ -344,7 +344,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.8.6</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -400,7 +400,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.8.3';
+      const APP_VERSION = 'v1.8.6';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -604,15 +604,41 @@
        * 2. KONSTANTA & DATA REFERENSI KPWBI PROVINSI JAWA TENGAH
        * ====================================================================== */
       const UNIT_KERJA_LIST = [
-        'Fungsi Logistik & SDM',
-        'Fungsi Pengelolaan Uang Rupiah (PUR)',
-        'Fungsi Implementasi Kebijakan Sistem Pembayaran (IKSP)',
-        'Fungsi Pengembangan UMKM & Keuangan Inklusif (FPPU/KPKP)',
-        'Fungsi Data & Statistik Ekonomi (FDSEK)',
-        'Fungsi Kehumasan',
-        'Tim Perumusan KEKDA',
-        'Operasional Pimpinan'
+        'PUR',
+        'KI',
+        'LOGISTIK',
+        'SDM',
+        'IKSP',
+        'FPPU',
+        'HUMAS',
+        'KPKP',
+        'FDSEK',
+        'CA',
+        'IPEBI',
+        'PIPEBI',
+        'PPBI',
+        'PROTOKOL'
       ];
+
+      const LEGACY_UNIT_KERJA_MAP = {
+        'fungsi logistik & sdm': 'LOGISTIK',
+        'fungsi pengelolaan uang rupiah (pur)': 'PUR',
+        'fungsi implementasi kebijakan sistem pembayaran (iksp)': 'IKSP',
+        'fungsi pengembangan umkm & keuangan inklusif (fppu/kpkp)': 'FPPU',
+        'fungsi data & statistik ekonomi (fdsek)': 'FDSEK',
+        'fungsi kehumasan': 'HUMAS',
+        'tim perumusan kekda': 'KI',
+        'operasional pimpinan': 'LOGISTIK'
+      };
+
+      function normalizeUnitKerja(unitVal, fallback = 'LOGISTIK') {
+        const raw = String(unitVal || '').trim();
+        if (!raw) return fallback;
+        const exact = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === raw.toLowerCase());
+        if (exact) return exact;
+        const mapped = LEGACY_UNIT_KERJA_MAP[raw.toLowerCase()];
+        return mapped || fallback;
+      }
 
       const TUJUAN_PRESET_CHIPS = [
         {
@@ -650,7 +676,7 @@
           nip: 'ahmadrizal807@gmail.com',
           email: 'ahmadrizal807@gmail.com',
           nama: 'Ahmad Rizal',
-          unit_kerja: 'Fungsi Logistik & SDM',
+          unit_kerja: 'LOGISTIK',
           role: 'pegawai',
           driver_id: null
         },
@@ -658,7 +684,7 @@
           nip: 'BI-19910722-04',
           email: 'rina.kusuma@bi.go.id',
           nama: 'Rina Kusumawardhani',
-          unit_kerja: 'Fungsi Pengelolaan Uang Rupiah (PUR)',
+          unit_kerja: 'PUR',
           role: 'pegawai',
           driver_id: null
         },
@@ -666,7 +692,7 @@
           nip: 'BI-DRV-1003',
           email: 'iwan@bi.go.id',
           nama: 'Iwan',
-          unit_kerja: 'Fungsi Logistik & SDM',
+          unit_kerja: 'LOGISTIK',
           role: 'driver',
           driver_id: 'drv-03'
         },
@@ -674,7 +700,7 @@
           nip: 'BI-DRV-1001',
           email: 'andrijanto@bi.go.id',
           nama: 'Andrijanto',
-          unit_kerja: 'Fungsi Logistik & SDM',
+          unit_kerja: 'LOGISTIK',
           role: 'driver',
           driver_id: 'drv-01'
         },
@@ -1284,7 +1310,7 @@
               id: 'bkg-seed-01',
               kode_booking: `BI-JTG-${ymCode}-001`,
               nama_peminjam: 'Rina Kusumawardhani',
-              unit_kerja: 'Fungsi Pengelolaan Uang Rupiah (PUR)',
+              unit_kerja: 'PUR',
               tujuan: 'Koordinasi Perbankan / Kas Titipan — Bank Jateng Pusat',
               keperluan: 'Distribusi & monitoring layanan kas titipan wilayah Kota Semarang',
               tanggal: today,
@@ -1307,7 +1333,7 @@
               id: 'bkg-seed-02',
               kode_booking: `BI-JTG-${ymCode}-002`,
               nama_peminjam: 'Aditya Pratama',
-              unit_kerja: 'Fungsi Data & Statistik Ekonomi (FDSEK)',
+              unit_kerja: 'FDSEK',
               tujuan: 'Kunjungan Daerah / TPID — Pemkab Kendal & Batang',
               keperluan: 'Survei harga pangan strategis dan rapat koordinasi TPID',
               tanggal: yesterday,
@@ -1330,7 +1356,7 @@
               id: 'bkg-seed-03',
               kode_booking: `BI-JTG-${ymCode}-003`,
               nama_peminjam: 'Dewi Anggraini',
-              unit_kerja: 'Fungsi Pengembangan UMKM & Keuangan Inklusif (FPPU/KPKP)',
+              unit_kerja: 'FPPU',
               tujuan: 'Kunjungan Klaster UMKM Binaan BI — Salatiga',
               keperluan: 'Pendampingan digitalisasi QRIS & evaluasi ekspor klaster kopi',
               tanggal: threeDaysAgo,
@@ -1960,7 +1986,7 @@
               parsed.nip = 'ahmadrizal807@gmail.com';
               parsed.email = 'ahmadrizal807@gmail.com';
               parsed.nama = 'Ahmad Rizal';
-              parsed.unit_kerja = 'Fungsi Logistik & SDM';
+              parsed.unit_kerja = 'LOGISTIK';
               try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed)); } catch (_) {}
             } else if (parsed && /slamet riyadi/i.test(String(parsed.nama || ''))) {
               parsed.nama = 'Iwan';
@@ -1970,6 +1996,10 @@
               parsed.nama = 'Andrijanto';
               parsed.nip = 'BI-DRV-1001';
               parsed.email = 'andrijanto@bi.go.id';
+            }
+            if (parsed && parsed.role !== 'admin' && parsed.unit_kerja && LEGACY_UNIT_KERJA_MAP[String(parsed.unit_kerja).trim().toLowerCase()]) {
+              parsed.unit_kerja = normalizeUnitKerja(parsed.unit_kerja, 'LOGISTIK');
+              try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(parsed)); } catch (_) {}
             }
             return parsed;
           }
@@ -1998,8 +2028,8 @@
           jam_mulai: INITIAL_BOOKING_SLOT.jam_mulai,
           jam_selesai: INITIAL_BOOKING_SLOT.jam_selesai,
           nama_peminjam: '',
-          unit_kerja: 'Fungsi Data & Statistik Ekonomi (FDSEK)',
-          unitSearch: 'Fungsi Data & Statistik Ekonomi (FDSEK)',
+          unit_kerja: 'LOGISTIK',
+          unitSearch: 'LOGISTIK',
           unitDropdownOpen: false,
           tujuan: '',
           keperluan: '',
@@ -2160,7 +2190,7 @@
       AppState.role = 'pegawai';
       AppState.activeNav = ROLE_NAVS_DEFAULT_NAV('pegawai');
       AppState.bookingForm.nama_peminjam = AppState.session.nama || 'Ahmad Rizal';
-      AppState.bookingForm.unit_kerja = AppState.session.unit_kerja || UNIT_KERJA_LIST[0];
+      AppState.bookingForm.unit_kerja = normalizeUnitKerja(AppState.session.unit_kerja, UNIT_KERJA_LIST[0]);
       AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
       AppState.selectedDriverId = DriverAuth.getActiveDriverId();
 
@@ -2795,8 +2825,7 @@
         closeMobileDrawer();
         // Pra-isi nama & unit kerja admin pada formulir peminjaman agar siap mengajukan kendaraan untuk diri sendiri
         AppState.bookingForm.nama_peminjam = AppState.session.nama || DEFAULT_PRIMARY_ADMIN.nama;
-        const unitMatch = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === String(AppState.session.unit_kerja || '').toLowerCase());
-        AppState.bookingForm.unit_kerja = unitMatch || 'Fungsi Logistik & SDM';
+        AppState.bookingForm.unit_kerja = normalizeUnitKerja(AppState.session.unit_kerja, 'LOGISTIK');
         AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
         AppState.role = 'pegawai';
         AppState.activeNav = 'pinjam';
@@ -3006,9 +3035,11 @@
                   </span>
                   <span class="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/30 text-[9px] font-sport text-emerald-300 font-bold tracking-wider">AKTIF</span>
                 </div>
-                <div class="text-[11px] text-blue-200/80 mt-1.5 leading-snug">
-                  ${escapeHtml(SyncEngine.getModeLabel())}
-                </div>
+                ${AppState.role === 'admin' ? `
+                  <div class="text-[11px] text-blue-200/80 mt-1.5 leading-snug">
+                    ${escapeHtml(SyncEngine.getModeLabel())}
+                  </div>
+                ` : ''}
                 <div class="mt-2.5 pt-2.5 border-t border-white/10">
                   <div class="flex items-center justify-between text-[11px] text-blue-200/90 tabular-nums mb-1.5">
                     <span>Armada Ready</span>
@@ -8692,7 +8723,7 @@
               try { localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(AppState.session)); } catch (_) {}
 
               AppState.bookingForm.nama_peminjam = adminName;
-              AppState.bookingForm.unit_kerja = UNIT_KERJA_LIST.includes(adminUnit) ? adminUnit : 'Fungsi Logistik & SDM';
+              AppState.bookingForm.unit_kerja = normalizeUnitKerja(adminUnit, 'LOGISTIK');
               AppState.bookingForm.unitSearch = AppState.bookingForm.unit_kerja;
 
               AppState.role = 'admin';
@@ -8794,7 +8825,7 @@
             nip: acc.nip || acc.identifier,
             email: acc.email || '',
             nama: acc.nama,
-            unit_kerja: acc.unit_kerja || UNIT_KERJA_LIST[0],
+            unit_kerja: normalizeUnitKerja(acc.unit_kerja, UNIT_KERJA_LIST[0]),
             role: acc.role,
             driver_id: acc.driver_id || null
           };
