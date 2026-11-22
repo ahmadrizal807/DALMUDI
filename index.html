@@ -352,7 +352,7 @@
       <!-- Desktop Institutional Footer -->
       <footer class="hidden md:block border-t border-slate-200/90 bg-white/80 backdrop-blur-sm px-6 lg:px-8 py-3 text-xs text-slate-500">
         <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.9.3</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
+          <span><strong class="font-sport text-[#0B3B60] tracking-wide">DALMUDI</strong> <span id="footer-app-version" class="ml-1 px-1.5 py-0.5 rounded bg-[#0B3B60]/10 text-[#0B3B60] font-sport font-bold text-[10px] tabular-nums">v1.10.0</span> — Kantor Perwakilan Bank Indonesia Provinsi Jawa Tengah · Jl. Imam Bardjo SH No. 4, Semarang</span>
           <span class="tabular-nums font-medium">Fungsi Logistik &amp; Pengelolaan Aset · Telemetry 24-Jam WIB</span>
         </div>
       </footer>
@@ -411,7 +411,7 @@
       };
 
       // Versi Aplikasi DALMUDI (Selalu dinaikkan setiap ada pembaruan fitur/perubahan)
-      const APP_VERSION = 'v1.9.3';
+      const APP_VERSION = 'v1.10.0';
 
       // PIN Default Akses Tab Admin Logistik (6 Digit — dapat diubah di menu Admin -> Driver & Sistem)
       const DEFAULT_ADMIN_PIN = '211126';
@@ -1946,6 +1946,24 @@
           }
         },
 
+        async postBookingsToGAS(bookings) {
+          const list = Array.isArray(bookings) ? bookings : (bookings ? [bookings] : []);
+          if (list.length === 0) return { skipped: true };
+          if (list.length === 1) {
+            return this.postToGAS('CREATE_BOOKING', list[0]);
+          }
+          const batchRes = await this.postToGAS('CREATE_BOOKINGS_BATCH', { bookings: list });
+          if (batchRes && batchRes.error && /Action tidak dikenali/i.test(String(batchRes.error))) {
+            // Kompatibilitas otomatis jika Code.gs versi sebelumnya belum di-deploy ulang
+            const fallbackResults = [];
+            for (const b of list) {
+              fallbackResults.push(await this.postToGAS('CREATE_BOOKING', b));
+            }
+            return { status: 'success', fallback: true, results: fallbackResults };
+          }
+          return batchRes;
+        },
+
         async testGasConnection() {
           if (!this.hasGasUrl()) {
             showToast('URL GAS Kosong', 'Masukkan URL Web App Google Apps Script terlebih dahulu.', 'warning');
@@ -2483,7 +2501,10 @@
           selectedChip: '',
           hideUnavailable: false,
           vehicle_id: '',
-          driver_id: ''
+          driver_id: '',
+          vehicle_ids: [],
+          driver_assignments: {},
+          activeAssignVehicleId: ''
         },
 
         // Form state modul Driver (BBM / E-Toll)
@@ -4065,21 +4086,54 @@
         }));
         const readyDrvCount = driverStatuses.filter((x) => x.avail.available).length;
 
-        // Pastikan pilihan lama tidak bentrok bila tanggal/jam baru diubah
-        if (bf.vehicle_id) {
-          const curV = vehicleStatuses.find((x) => x.vehicle.id === bf.vehicle_id);
-          if (!curV || !curV.avail.available) bf.vehicle_id = '';
-        }
-        if (bf.driver_id) {
-          const curD = driverStatuses.find((x) => x.driver.id === bf.driver_id);
-          if (!curD || !curD.avail.available) bf.driver_id = '';
+        // Normalisasi & sinkronisasi pilihan multi-armada & penugasan driver (1 atau >1 unit untuk acara kedinasan)
+        if (!Array.isArray(bf.vehicle_ids)) bf.vehicle_ids = bf.vehicle_id ? [bf.vehicle_id] : [];
+        if (!bf.driver_assignments || typeof bf.driver_assignments !== 'object') bf.driver_assignments = {};
+        if (bf.vehicle_id && bf.vehicle_ids.length === 0) bf.vehicle_ids = [bf.vehicle_id];
+        if (bf.vehicle_id && bf.driver_id && !bf.driver_assignments[bf.vehicle_id]) {
+          bf.driver_assignments[bf.vehicle_id] = bf.driver_id;
         }
 
-        const selectedVeh = getVehicleById(bf.vehicle_id);
-        const selectedDrv = getDriverById(bf.driver_id);
+        // Pastikan pilihan lama tidak bentrok bila tanggal/jam baru diubah
+        const availVehIdSet = new Set(vehicleStatuses.filter((x) => x.avail.available).map((x) => x.vehicle.id));
+        const availDrvIdSet = new Set(driverStatuses.filter((x) => x.avail.available).map((x) => x.driver.id));
+        bf.vehicle_ids = [...new Set(bf.vehicle_ids)].filter((vid) => availVehIdSet.has(vid));
+
+        const cleanAssignments = {};
+        const seenDrivers = new Set();
+        bf.vehicle_ids.forEach((vid) => {
+          const did = bf.driver_assignments[vid];
+          if (did && availDrvIdSet.has(did) && !seenDrivers.has(did)) {
+            cleanAssignments[vid] = did;
+            seenDrivers.add(did);
+          }
+        });
+        bf.driver_assignments = cleanAssignments;
+        bf.vehicle_id = bf.vehicle_ids[0] || '';
+        bf.driver_id = bf.vehicle_id ? (bf.driver_assignments[bf.vehicle_id] || '') : '';
+        if (!bf.vehicle_ids.includes(bf.activeAssignVehicleId)) {
+          bf.activeAssignVehicleId = bf.vehicle_ids.find((vid) => !bf.driver_assignments[vid]) || bf.vehicle_ids[0] || '';
+        }
+
+        const selectedVehicles = bf.vehicle_ids.map((vid) => getVehicleById(vid)).filter(Boolean);
+        const isMultiVehicle = selectedVehicles.length > 1;
+        const totalSelectedSeats = selectedVehicles.reduce((sum, v) => sum + (Number(v.kapasitas) || 0), 0);
+        const assignedDriverCount = selectedVehicles.filter((v) => Boolean(bf.driver_assignments[v.id])).length;
+        const allDriversAssigned = selectedVehicles.length > 0 && assignedDriverCount === selectedVehicles.length;
+
+        const selectedVeh = selectedVehicles[0] || null;
+        const selectedDrv = selectedVeh ? getDriverById(bf.driver_assignments[selectedVeh.id]) : null;
         const step1Sub = validTime
           ? (isMultiDay ? `${dayCount} Hari · ${formatTanggalSingkatIndo(bf.tanggal)}–${formatTanggalSingkatIndo(tglSelesai)}` : `${bf.jam_mulai}–${bf.jam_selesai}`)
           : 'Isi Jadwal';
+        const step2Sub = selectedVehicles.length === 0
+          ? `${readyVehCount} Ready`
+          : selectedVehicles.length === 1
+            ? selectedVehicles[0].plat_nomor
+            : `${selectedVehicles.length} Unit Dipilih`;
+        const step3Sub = selectedVehicles.length <= 1
+          ? (selectedDrv ? selectedDrv.nama.split(' ')[0] : `${readyDrvCount} Ready`)
+          : `${assignedDriverCount}/${selectedVehicles.length} Driver`;
         const durationLabel = calcDurationLabel(bf.jam_mulai, bf.jam_selesai, bf.tanggal, tglSelesai);
 
         return `
@@ -4089,7 +4143,7 @@
               <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
                 <div class="min-w-0">
                   <h2 class="text-base sm:text-lg font-extrabold text-[#0B3B60] leading-snug">Pengajuan Peminjaman Kendaraan Dinas</h2>
-                  <p class="text-xs text-slate-500 mt-0.5">Mendukung peminjaman harian maupun multi-hari dengan filter jadwal anti-bentrok otomatis.</p>
+                  <p class="text-xs text-slate-500 mt-0.5">Mendukung peminjaman 1 atau lebih kendaraan sekaligus (acara kedinasan) serta harian/multi-hari anti-bentrok.</p>
                 </div>
                 <div class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#EFF6FF] text-[#1D4ED8] text-[11px] sm:text-xs font-bold tabular-nums self-start sm:self-auto">
                   <i data-lucide="shield-check" class="w-4 h-4 shrink-0"></i>
@@ -4101,13 +4155,13 @@
               <div class="mt-4 sm:mt-5 grid grid-cols-3 gap-2 sm:gap-4">
                 ${[
                   { n: 1, title: 'Waktu & Detail', mobileTitle: 'Waktu', sub: step1Sub },
-                  { n: 2, title: 'Pilih Armada', mobileTitle: 'Armada', sub: selectedVeh ? selectedVeh.plat_nomor : `${readyVehCount} Ready` },
-                  { n: 3, title: 'Pilih Driver & Ajukan', mobileTitle: 'Driver', sub: selectedDrv ? selectedDrv.nama.split(' ')[0] : `${readyDrvCount} Ready` }
+                  { n: 2, title: 'Pilih Armada', mobileTitle: 'Armada', sub: step2Sub },
+                  { n: 3, title: 'Pilih Driver & Ajukan', mobileTitle: 'Driver', sub: step3Sub }
                 ].map((s) => {
                   const isCurrent = bf.step === s.n;
                   const isDone = (s.n === 1 && validTime && bf.nama_peminjam && bf.unit_kerja && bf.tujuan) ||
-                                 (s.n === 2 && Boolean(bf.vehicle_id)) ||
-                                 (s.n === 3 && Boolean(bf.driver_id));
+                                 (s.n === 2 && selectedVehicles.length > 0) ||
+                                 (s.n === 3 && allDriversAssigned);
                   return `
                     <button
                       onclick="App.setBookingStep(${s.n})"
@@ -4405,7 +4459,7 @@
               </div>
             ` : ''}
 
-            <!-- STEP 2: Pemilihan Armada & Plat Nomor (Real-Time Filter) -->
+            <!-- STEP 2: Pemilihan Armada & Plat Nomor (Mendukung 1 atau >1 Kendaraan untuk Acara Kedinasan) -->
             ${bf.step === 2 ? `
               <div class="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-card space-y-5">
                 <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
@@ -4428,11 +4482,40 @@
                   </label>
                 </div>
 
+                <!-- Info Multi-Kendaraan (Rombongan / Acara Kedinasan) -->
+                <div class="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl ${isMultiVehicle ? 'bg-[#EFF6FF] border border-blue-200' : 'bg-slate-50 border border-slate-200/80'}">
+                  <div class="flex items-center gap-2 text-xs text-slate-700 min-w-0">
+                    <i data-lucide="${isMultiVehicle ? 'layers' : 'info'}" class="w-4 h-4 ${isMultiVehicle ? 'text-[#1D4ED8]' : 'text-[#0B3B60]'} shrink-0"></i>
+                    <span>
+                      ${selectedVehicles.length === 0
+                        ? 'Anda dapat memilih <strong>1 unit</strong> atau <strong>beberapa kendaraan sekaligus</strong> untuk kebutuhan acara kedinasan.'
+                        : isMultiVehicle
+                          ? `Mode Rombongan Aktif: <strong>${selectedVehicles.length} unit armada dipilih</strong> (total kapasitas <strong>${totalSelectedSeats} kursi</strong>). Ketuk unit lagi untuk membatalkan pilihan.`
+                          : `<strong>1 unit dipilih</strong> (${escapeHtml(selectedVehicles[0].plat_nomor)} · ${selectedVehicles[0].kapasitas} kursi). Ketuk unit tersedia lain jika butuh &gt;1 kendaraan.`}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <span class="px-2.5 py-1 rounded-lg ${selectedVehicles.length > 0 ? 'bg-[#0B3B60] text-white' : 'bg-white border border-slate-200 text-slate-500'} font-sport text-[11px] font-bold tabular-nums">
+                      ${selectedVehicles.length} UNIT · ${totalSelectedSeats} KURSI
+                    </span>
+                    ${selectedVehicles.length > 1 ? `
+                      <button
+                        type="button"
+                        onclick="App.clearBookingVehicles()"
+                        class="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-[11px] font-bold text-slate-600 transition"
+                      >
+                        Reset
+                      </button>
+                    ` : ''}
+                  </div>
+                </div>
+
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3.5 sm:gap-4">
                   ${vehicleStatuses
                     .filter((item) => !bf.hideUnavailable || item.avail.available)
                     .map(({ vehicle: v, avail, health }) => {
-                      const isSelected = bf.vehicle_id === v.id;
+                      const selIdx = bf.vehicle_ids.indexOf(v.id);
+                      const isSelected = selIdx > -1;
                       const disabled = !avail.available;
                       return `
                         <button
@@ -4452,7 +4535,7 @@
                               <span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-bold">${escapeHtml(v.kategori)}</span>
                             </div>
                             ${isSelected
-                              ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#0B3B60] text-white text-xs font-bold"><i data-lucide="check" class="w-3.5 h-3.5"></i> Dipilih</span>`
+                              ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#0B3B60] text-white text-xs font-bold tabular-nums"><i data-lucide="check" class="w-3.5 h-3.5"></i> ${isMultiVehicle ? `Unit #${selIdx + 1}` : 'Dipilih'}</span>`
                               : renderStatusPill(avail.badgeType, avail.reason)
                             }
                           </div>
@@ -4493,44 +4576,112 @@
                     onclick="App.goToBookingStep3()"
                     class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#0B3B60] hover:bg-[#072A45] text-white font-bold text-sm shadow-sm transition"
                   >
-                    <span>Lanjut Pilih Pengemudi (${readyDrvCount} Tersedia)</span>
+                    <span>${isMultiVehicle ? `Lanjut Pilih ${selectedVehicles.length} Pengemudi (${readyDrvCount} Ready)` : `Lanjut Pilih Pengemudi (${readyDrvCount} Tersedia)`}</span>
                     <i data-lucide="arrow-right" class="w-4 h-4 shrink-0"></i>
                   </button>
                 </div>
               </div>
             ` : ''}
 
-            <!-- STEP 3: Pemilihan Pengemudi & Konfirmasi Instan -->
-            ${bf.step === 3 ? `
+            <!-- STEP 3: Pemilihan Pengemudi & Konfirmasi Instan (Mendukung 1 atau >1 Kendaraan) -->
+            ${bf.step === 3 ? (() => {
+              const activeVehId = bf.activeAssignVehicleId || (selectedVehicles[0]?.id || '');
+              const activeVehIdx = selectedVehicles.findIndex((v) => v.id === activeVehId);
+              const activeVehObj = activeVehIdx > -1 ? selectedVehicles[activeVehIdx] : null;
+              return `
               <div class="grid grid-cols-1 lg:grid-cols-5 gap-5">
                 <div class="lg:col-span-3 bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-card space-y-4">
-                  <div class="flex items-center gap-2.5 border-b border-slate-100 pb-3.5">
-                    <span class="w-8 h-8 rounded-xl bg-[#0B3B60]/10 text-[#0B3B60] flex items-center justify-center font-extrabold text-sm shrink-0">3</span>
-                    <div class="min-w-0">
-                      <h3 class="text-sm sm:text-base font-extrabold text-slate-900">Pilih Pengemudi (Available Driver)</h3>
-                      <p class="text-xs text-slate-500">Hanya pengemudi tanpa jadwal bentrok yang dapat dipilih.</p>
+                  <div class="flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-100 pb-3.5">
+                    <div class="flex items-center gap-2.5 min-w-0">
+                      <span class="w-8 h-8 rounded-xl bg-[#0B3B60]/10 text-[#0B3B60] flex items-center justify-center font-extrabold text-sm shrink-0">3</span>
+                      <div class="min-w-0">
+                        <h3 class="text-sm sm:text-base font-extrabold text-slate-900">
+                          ${isMultiVehicle ? `Pasangkan Pengemudi (${assignedDriverCount}/${selectedVehicles.length} Unit)` : 'Pilih Pengemudi (Available Driver)'}
+                        </h3>
+                        <p class="text-xs text-slate-500">
+                          ${isMultiVehicle
+                            ? `Ketuk unit di bawah lalu pilih pengemudi unik untuk tiap kendaraan.`
+                            : 'Hanya pengemudi tanpa jadwal bentrok yang dapat dipilih.'}
+                        </p>
+                      </div>
                     </div>
+                    ${isMultiVehicle ? `
+                      <button
+                        type="button"
+                        onclick="App.autoAssignBookingDrivers()"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#EFF6FF] hover:bg-blue-100 border border-blue-200 text-[#1D4ED8] text-xs font-bold transition shrink-0"
+                      >
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+                        <span>Pilih Driver Otomatis</span>
+                      </button>
+                    ` : ''}
                   </div>
+
+                  ${isMultiVehicle ? `
+                    <!-- Slot Unit Rombongan untuk Penugasan Driver 1-per-1 -->
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      ${selectedVehicles.map((v, idx) => {
+                        const isActiveSlot = v.id === activeVehId;
+                        const assignedDrv = getDriverById(bf.driver_assignments[v.id]);
+                        return `
+                          <button
+                            type="button"
+                            onclick="App.setActiveAssignVehicle('${v.id}')"
+                            class="text-left p-3 rounded-xl border-2 transition flex items-center justify-between gap-2 ${
+                              isActiveSlot
+                                ? 'border-[#0B3B60] bg-[#0B3B60] text-white shadow-sm'
+                                : assignedDrv
+                                  ? 'border-emerald-200 bg-[#ECFDF5]/70 text-slate-900 hover:border-emerald-300'
+                                  : 'border-amber-200 bg-amber-50/60 text-slate-900 hover:border-[#0B3B60]/50'
+                            }"
+                          >
+                            <div class="min-w-0">
+                              <div class="text-[10px] font-sport font-bold uppercase tracking-wider ${isActiveSlot ? 'text-sky-300' : 'text-slate-500'}">Unit #${idx + 1} · ${escapeHtml(v.plat_nomor)}</div>
+                              <div class="text-xs font-extrabold truncate mt-0.5">${escapeHtml(v.jenis_mobil)}</div>
+                              <div class="text-[11px] font-semibold mt-1 truncate ${isActiveSlot ? 'text-emerald-300' : assignedDrv ? 'text-emerald-700' : 'text-amber-700'}">
+                                ${assignedDrv ? `✓ Driver: ${escapeHtml(assignedDrv.nama)}` : '• Pilih driver untuk unit ini'}
+                              </div>
+                            </div>
+                            <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-extrabold shrink-0 ${
+                              isActiveSlot ? 'bg-white text-[#0B3B60]' : assignedDrv ? 'bg-emerald-600 text-white' : 'bg-amber-200 text-amber-900'
+                            }">${assignedDrv ? '✓' : idx + 1}</span>
+                          </button>
+                        `;
+                      }).join('')}
+                    </div>
+                    ${activeVehObj ? `
+                      <div class="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 flex items-center gap-2">
+                        <i data-lucide="user-check" class="w-4 h-4 text-[#0B3B60] shrink-0"></i>
+                        <span>Sedang memilih pengemudi untuk <strong>Unit #${activeVehIdx + 1}: ${escapeHtml(activeVehObj.plat_nomor)} (${escapeHtml(activeVehObj.jenis_mobil)})</strong></span>
+                      </div>
+                    ` : ''}
+                  ` : ''}
 
                   <div class="space-y-3">
                     ${driverStatuses.map(({ driver: d, avail }) => {
-                      const isSelected = bf.driver_id === d.id;
-                      const disabled = !avail.available;
+                      const assignedVehId = Object.keys(bf.driver_assignments).find((vid) => bf.driver_assignments[vid] === d.id) || '';
+                      const isSelectedForActive = Boolean(activeVehId && assignedVehId === activeVehId);
+                      const isUsedByOtherSlot = Boolean(assignedVehId && assignedVehId !== activeVehId);
+                      const otherSlotIdx = isUsedByOtherSlot ? selectedVehicles.findIndex((v) => v.id === assignedVehId) : -1;
+                      const otherSlotVeh = otherSlotIdx > -1 ? selectedVehicles[otherSlotIdx] : null;
+                      const disabled = !avail.available || isUsedByOtherSlot;
                       return `
                         <button
                           type="button"
                           ${disabled ? 'disabled' : `onclick="App.selectBookingDriver('${d.id}')"`}
                           class="w-full text-left p-3.5 sm:p-4 rounded-xl border-2 transition flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 ${
-                            isSelected
+                            isSelectedForActive
                               ? 'border-[#0B3B60] bg-[#EFF6FF]/60 shadow-soft'
-                              : disabled
-                                ? 'border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed'
-                                : 'border-slate-200 bg-white hover:border-[#1D4ED8]/60'
+                              : isUsedByOtherSlot
+                                ? 'border-emerald-200 bg-emerald-50/40 opacity-80 cursor-not-allowed'
+                                : disabled
+                                  ? 'border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed'
+                                  : 'border-slate-200 bg-white hover:border-[#1D4ED8]/60'
                           }"
                         >
                           <div class="flex items-center gap-3 min-w-0">
                             <div class="w-11 h-11 sm:w-12 sm:h-12 rounded-full font-extrabold text-sm flex items-center justify-center shrink-0 ${
-                              isSelected ? 'bg-[#0B3B60] text-white' : 'bg-[#0B3B60]/10 text-[#0B3B60]'
+                              isSelectedForActive ? 'bg-[#0B3B60] text-white' : isUsedByOtherSlot ? 'bg-emerald-600 text-white' : 'bg-[#0B3B60]/10 text-[#0B3B60]'
                             }">
                               ${escapeHtml(getInitials(d.nama))}
                             </div>
@@ -4546,9 +4697,11 @@
                             </div>
                           </div>
                           <div class="sm:shrink-0 sm:text-right self-start sm:self-center">
-                            ${isSelected
-                              ? `<span class="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[#0B3B60] text-white text-xs font-bold"><i data-lucide="check" class="w-3.5 h-3.5"></i> Dipilih</span>`
-                              : renderStatusPill(avail.badgeType, avail.reason)
+                            ${isSelectedForActive
+                              ? `<span class="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[#0B3B60] text-white text-xs font-bold"><i data-lucide="check" class="w-3.5 h-3.5"></i> ${isMultiVehicle ? `Unit #${activeVehIdx + 1}` : 'Dipilih'}</span>`
+                              : isUsedByOtherSlot
+                                ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-bold">✓ Unit #${otherSlotIdx + 1} (${escapeHtml(otherSlotVeh ? otherSlotVeh.plat_nomor : '')})</span>`
+                                : renderStatusPill(avail.badgeType, avail.reason)
                             }
                           </div>
                         </button>
@@ -4570,9 +4723,12 @@
                 <!-- Ringkasan Konfirmasi Instan -->
                 <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-card flex flex-col justify-between">
                   <div>
-                    <h3 class="text-sm font-extrabold text-[#0B3B60] uppercase tracking-wide pb-3 border-b border-slate-100">
-                      Ringkasan Peminjaman
-                    </h3>
+                    <div class="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                      <h3 class="text-sm font-extrabold text-[#0B3B60] uppercase tracking-wide">
+                        Ringkasan Peminjaman
+                      </h3>
+                      ${isMultiVehicle ? `<span class="px-2 py-0.5 rounded-md bg-[#1D4ED8] text-white font-sport text-[10px] font-bold uppercase tracking-wide tabular-nums">${selectedVehicles.length} UNIT · ${totalSelectedSeats} KURSI</span>` : ''}
+                    </div>
                     <dl class="mt-4 space-y-3 text-xs">
                       <div class="flex justify-between gap-2">
                         <dt class="text-slate-500">${isMultiDay ? 'Rentang Tanggal' : 'Tanggal'}</dt>
@@ -4606,42 +4762,68 @@
                         <dd class="font-bold text-slate-900">${escapeHtml(bf.tujuan || '-')}</dd>
                         ${bf.keperluan ? `<dd class="text-slate-600 mt-0.5">${escapeHtml(bf.keperluan)}</dd>` : ''}
                       </div>
-                      <div class="pt-2 border-t border-slate-100">
-                        <dt class="text-slate-500 mb-1.5">Armada Terpilih</dt>
-                        <dd class="flex items-center justify-between gap-2">
-                          <span class="font-bold text-slate-900">${selectedVeh ? escapeHtml(selectedVeh.jenis_mobil) : '<span class="text-rose-600">Belum dipilih</span>'}</span>
-                          ${selectedVeh ? renderIndoPlate(selectedVeh.plat_nomor, selectedVeh.masa_berlaku_plat) : ''}
-                        </dd>
-                      </div>
-                      <div class="pt-2 border-t border-slate-100 flex justify-between items-center gap-2">
-                        <dt class="text-slate-500">Pengemudi</dt>
-                        <dd class="font-bold text-slate-900">
-                          ${selectedDrv ? `${escapeHtml(selectedDrv.nama)} <span class="text-amber-600 tabular-nums">★ ${Number(selectedDrv.rating_rata_rata).toFixed(1)}</span>` : '<span class="text-rose-600">Belum dipilih</span>'}
-                        </dd>
-                      </div>
+
+                      ${!isMultiVehicle ? `
+                        <div class="pt-2 border-t border-slate-100">
+                          <dt class="text-slate-500 mb-1.5">Armada Terpilih</dt>
+                          <dd class="flex items-center justify-between gap-2">
+                            <span class="font-bold text-slate-900">${selectedVeh ? escapeHtml(selectedVeh.jenis_mobil) : '<span class="text-rose-600">Belum dipilih</span>'}</span>
+                            ${selectedVeh ? renderIndoPlate(selectedVeh.plat_nomor, selectedVeh.masa_berlaku_plat) : ''}
+                          </dd>
+                        </div>
+                        <div class="pt-2 border-t border-slate-100 flex justify-between items-center gap-2">
+                          <dt class="text-slate-500">Pengemudi</dt>
+                          <dd class="font-bold text-slate-900">
+                            ${selectedDrv ? `${escapeHtml(selectedDrv.nama)} <span class="text-amber-600 tabular-nums">★ ${Number(selectedDrv.rating_rata_rata).toFixed(1)}</span>` : '<span class="text-rose-600">Belum dipilih</span>'}
+                          </dd>
+                        </div>
+                      ` : `
+                        <div class="pt-2 border-t border-slate-100">
+                          <dt class="text-slate-500 mb-2">Daftar Armada &amp; Pengemudi (${assignedDriverCount}/${selectedVehicles.length})</dt>
+                          <dd class="space-y-2">
+                            ${selectedVehicles.map((v, idx) => {
+                              const d = getDriverById(bf.driver_assignments[v.id]);
+                              return `
+                                <div class="p-2.5 rounded-xl border ${d ? 'bg-slate-50 border-slate-200' : 'bg-amber-50/70 border-amber-200'} flex items-center justify-between gap-2">
+                                  <div class="min-w-0">
+                                    <div class="font-extrabold text-slate-900 truncate">#${idx + 1} · ${escapeHtml(v.jenis_mobil)}</div>
+                                    <div class="text-[11px] mt-0.5 ${d ? 'text-emerald-700 font-semibold' : 'text-rose-600 font-semibold'}">
+                                      ${d ? `Driver: ${escapeHtml(d.nama)} (★ ${Number(d.rating_rata_rata).toFixed(1)})` : 'Driver belum dipilih'}
+                                    </div>
+                                  </div>
+                                  ${renderIndoPlate(v.plat_nomor, v.masa_berlaku_plat)}
+                                </div>
+                              `;
+                            }).join('')}
+                          </dd>
+                        </div>
+                      `}
                     </dl>
                   </div>
 
                   <div class="mt-6 pt-4 border-t border-slate-100">
                     <button
                       onclick="App.submitBooking()"
-                      ${(!selectedVeh || !selectedDrv) ? 'disabled' : ''}
+                      ${!allDriversAssigned ? 'disabled' : ''}
                       class="w-full py-3.5 px-4 rounded-xl font-extrabold text-sm flex items-center justify-center gap-2 transition shadow-sm ${
-                        selectedVeh && selectedDrv
+                        allDriversAssigned
                           ? 'bg-[#0B3B60] hover:bg-[#072A45] text-white'
                           : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                       }"
                     >
                       <i data-lucide="check-circle-2" class="w-4 h-4"></i>
-                      <span>Ajukan Peminjaman Sekarang</span>
+                      <span>${isMultiVehicle ? `Ajukan ${selectedVehicles.length} Kendaraan Sekaligus` : 'Ajukan Peminjaman Sekarang'}</span>
                     </button>
                     <p class="text-[11px] text-slate-400 text-center mt-2">
-                      Status armada &amp; penugasan driver langsung aktif secara real-time.
+                      ${isMultiVehicle
+                        ? 'Setiap armada & pengemudi langsung menerima jadwal dinas masing-masing secara real-time.'
+                        : 'Status armada & penugasan driver langsung aktif secara real-time.'}
                     </p>
                   </div>
                 </div>
               </div>
-            ` : ''}
+              `;
+            })() : ''}
           </div>
         `;
       }
@@ -4694,7 +4876,15 @@
             </div>
 
             <div class="space-y-4">
-              ${sorted.map((b) => {
+              ${sorted.length === 0 ? `
+                <div class="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-card">
+                  <div class="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
+                    <i data-lucide="clipboard-list" class="w-6 h-6"></i>
+                  </div>
+                  <div class="text-sm font-extrabold text-slate-800">Belum Ada Riwayat Perjalanan Dinas</div>
+                  <p class="text-xs text-slate-500 mt-1">Ajukan peminjaman kendaraan dinas melalui tombol <strong>Booking Baru</strong> di atas.</p>
+                </div>
+              ` : sorted.map((b) => {
                 const veh = getVehicleById(b.vehicle_id);
                 const drv = getDriverById(b.driver_id);
                 const waitingRating = b.status === 'COMPLETED' && !b.rating;
@@ -5843,7 +6033,9 @@
               </div>
               <!-- Mobile Card View (< 768px) -->
               <div class="md:hidden divide-y divide-slate-100">
-                ${AppState.data.bookings.slice(0, 15).map((b) => {
+                ${AppState.data.bookings.length === 0 ? `
+                  <div class="p-6 text-center text-xs text-slate-400">Belum ada log peminjaman kendaraan dinas.</div>
+                ` : AppState.data.bookings.slice(0, 15).map((b) => {
                   const v = getVehicleById(b.vehicle_id);
                   const d = getDriverById(b.driver_id);
                   const canEdit = b.status !== 'COMPLETED';
@@ -5897,7 +6089,9 @@
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-slate-100">
-                    ${AppState.data.bookings.slice(0, 15).map((b) => {
+                    ${AppState.data.bookings.length === 0 ? `
+                      <tr><td colspan="6" class="px-4 py-8 text-center text-xs text-slate-400">Belum ada log peminjaman kendaraan dinas.</td></tr>
+                    ` : AppState.data.bookings.slice(0, 15).map((b) => {
                       const v = getVehicleById(b.vehicle_id);
                       const d = getDriverById(b.driver_id);
                       const canEdit = b.status !== 'COMPLETED';
@@ -5916,7 +6110,7 @@
                             <div class="text-slate-500 truncate max-w-[220px]">${escapeHtml(b.unit_kerja)}</div>
                           </td>
                           <td class="px-4 py-3 whitespace-nowrap">
-                            <div class="font-bold text-slate-800">${escapeHtml(v ? v.plat_nomor : '-')} <span class="font-normal text-slate-500">(${escapeHtml(v ? v.kategori : '')})</span></div>
+                            <div class="font-bold text-slate-800">${escapeHtml(v ? v.plat_nomor : '-')}${v && v.kategori ? ` <span class="font-normal text-slate-500">(${escapeHtml(v.kategori)})</span>` : ''}</div>
                             <div class="text-slate-500">${escapeHtml(d ? d.nama : '-')}</div>
                           </td>
                           <td class="px-4 py-3 whitespace-nowrap">
@@ -8517,25 +8711,59 @@
         `, 'max-w-xl');
       }
 
-      /** Modal Tiket Konfirmasi Booking Sukses */
-      function openBookingSuccessModal(booking) {
-        const v = getVehicleById(booking.vehicle_id);
-        const d = getDriverById(booking.driver_id);
+      /** Modal Tiket Konfirmasi Booking Sukses (Mendukung 1 Unit maupun Multi-Kendaraan Rombongan) */
+      function openBookingSuccessModal(bookingOrList) {
+        const list = Array.isArray(bookingOrList) ? bookingOrList.filter(Boolean) : (bookingOrList ? [bookingOrList] : []);
+        if (list.length === 0) return;
+        const first = list[0];
+        const isMulti = list.length > 1;
+        const vSingle = !isMulti ? getVehicleById(first.vehicle_id) : null;
+        const dSingle = !isMulti ? getDriverById(first.driver_id) : null;
 
         showModal(`
           <div class="p-6 text-center">
             <div class="w-14 h-14 rounded-2xl bg-[#ECFDF5] text-[#059669] flex items-center justify-center mx-auto mb-3">
               <i data-lucide="check-circle-2" class="w-8 h-8"></i>
             </div>
-            <h3 class="text-lg font-extrabold text-[#0B3B60]">Peminjaman Berhasil Diajukan!</h3>
-            <p class="text-xs text-slate-500 mt-1">Status armada &amp; penugasan pengemudi langsung aktif secara real-time.</p>
+            <h3 class="text-lg font-extrabold text-[#0B3B60]">
+              ${isMulti ? `${list.length} Kendaraan Berhasil Diajukan!` : 'Peminjaman Berhasil Diajukan!'}
+            </h3>
+            <p class="text-xs text-slate-500 mt-1">
+              ${isMulti
+                ? 'Seluruh armada rombongan & penugasan pengemudi langsung aktif secara real-time.'
+                : 'Status armada & penugasan pengemudi langsung aktif secara real-time.'}
+            </p>
 
-            <div class="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-left text-xs space-y-2">
-              <div class="flex justify-between"><span class="text-slate-500">Kode Booking</span><strong class="text-[#0B3B60] tabular-nums">${escapeHtml(booking.kode_booking)}</strong></div>
-              <div class="flex justify-between gap-2"><span class="text-slate-500">Jadwal</span><strong class="tabular-nums text-right">${escapeHtml(formatTanggalRangeIndo(booking.tanggal, booking.tanggal_selesai, false, true))} · ${booking.jam_mulai}–${booking.jam_selesai} WIB</strong></div>
-              <div class="flex justify-between items-center"><span class="text-slate-500">Kendaraan</span>${v ? renderIndoPlate(v.plat_nomor, v.masa_berlaku_plat) : '-'}</div>
-              <div class="flex justify-between"><span class="text-slate-500">Pengemudi</span><strong>${escapeHtml(d ? d.nama : '-')}</strong></div>
-            </div>
+            ${!isMulti ? `
+              <div class="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-left text-xs space-y-2">
+                <div class="flex justify-between"><span class="text-slate-500">Kode Booking</span><strong class="text-[#0B3B60] tabular-nums">${escapeHtml(first.kode_booking)}</strong></div>
+                <div class="flex justify-between gap-2"><span class="text-slate-500">Jadwal</span><strong class="tabular-nums text-right">${escapeHtml(formatTanggalRangeIndo(first.tanggal, first.tanggal_selesai, false, true))} · ${first.jam_mulai}–${first.jam_selesai} WIB</strong></div>
+                <div class="flex justify-between items-center"><span class="text-slate-500">Kendaraan</span>${vSingle ? renderIndoPlate(vSingle.plat_nomor, vSingle.masa_berlaku_plat) : '-'}</div>
+                <div class="flex justify-between"><span class="text-slate-500">Pengemudi</span><strong>${escapeHtml(dSingle ? dSingle.nama : '-')}</strong></div>
+              </div>
+            ` : `
+              <div class="mt-4 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-left text-xs space-y-2.5">
+                <div class="flex justify-between gap-2 pb-2 border-b border-slate-200/80">
+                  <span class="text-slate-500">Jadwal Rombongan</span>
+                  <strong class="tabular-nums text-right text-[#0B3B60]">${escapeHtml(formatTanggalRangeIndo(first.tanggal, first.tanggal_selesai, false, true))} · ${first.jam_mulai}–${first.jam_selesai} WIB</strong>
+                </div>
+                <div class="space-y-2 max-h-56 overflow-y-auto pr-0.5">
+                  ${list.map((b, idx) => {
+                    const v = getVehicleById(b.vehicle_id);
+                    const d = getDriverById(b.driver_id);
+                    return `
+                      <div class="p-2.5 rounded-xl bg-white border border-slate-200 flex items-center justify-between gap-2">
+                        <div class="min-w-0">
+                          <div class="font-extrabold text-[#0B3B60] tabular-nums">#${idx + 1} · ${escapeHtml(b.kode_booking)}</div>
+                          <div class="text-[11px] text-slate-700 font-semibold truncate">${escapeHtml(v ? v.jenis_mobil : '-')} · Driver: <strong>${escapeHtml(d ? d.nama : '-')}</strong></div>
+                        </div>
+                        ${v ? renderIndoPlate(v.plat_nomor, v.masa_berlaku_plat) : ''}
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            `}
 
             <div class="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
@@ -8552,7 +8780,7 @@
               </button>
             </div>
           </div>
-        `);
+        `, isMulti ? 'max-w-lg' : 'max-w-md');
       }
 
       /* ======================================================================
@@ -9384,6 +9612,9 @@
           AppState.bookingForm.step = 1;
           AppState.bookingForm.vehicle_id = '';
           AppState.bookingForm.driver_id = '';
+          AppState.bookingForm.vehicle_ids = [];
+          AppState.bookingForm.driver_assignments = {};
+          AppState.bookingForm.activeAssignVehicleId = '';
           AppState.bookingForm.tanggal = slot.tanggal;
           AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
           AppState.bookingForm.jam_mulai = slot.jam_mulai;
@@ -9395,8 +9626,99 @@
           const slot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
           AppState.bookingForm.vehicle_id = vehicleId;
+          AppState.bookingForm.vehicle_ids = vehicleId ? [vehicleId] : [];
+          AppState.bookingForm.driver_id = '';
+          AppState.bookingForm.driver_assignments = {};
+          AppState.bookingForm.activeAssignVehicleId = vehicleId || '';
           AppState.bookingForm.tanggal = slot.tanggal;
           AppState.bookingForm.tanggal_selesai = slot.tanggal_selesai;
+          AppState.bookingForm.jam_mulai = slot.jam_mulai;
+          AppState.bookingForm.jam_selesai = slot.jam_selesai;
+          switchRole('pegawai', 'pinjam');
+          const v = getVehicleById(vehicleId);
+          if (v) showToast('Armada Dipilih', `${v.plat_nomor} (${v.jenis_mobil}) ditandai. Anda dapat menambah unit lain di Langkah 2.`, 'info');
+        },
+
+        setBookingStep(stepNum) {
+          if (stepNum > 1) {
+            const bf = AppState.bookingForm;
+            const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
+            if (isStartDateTimeInPast(bf.tanggal, bf.jam_mulai)) {
+              showToast('Waktu Sudah Terlewat', `Saat ini sudah pukul ${getNowWibHHMM()} WIB. Pilih jam berangkat setelahnya atau ubah tanggal ke besok.`, 'warning');
+              bf.step = 1;
+              renderAll();
+              return;
+            }
+            if (!isBookingTimeRangeValid(bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai)) {
+              showToast('Periksa Waktu Pemakaian', 'Pastikan tanggal & jam kembali lebih besar dari waktu berangkat (WIB).', 'warning');
+              bf.step = 1;
+              renderAll();
+              return;
+            }
+          }
+          AppState.bookingForm.step = stepNum;
+          renderAll();
+        },
+
+        updateBookingField(key, val, shouldRender) {
+          AppState.bookingForm[key] = val;
+          if (shouldRender) renderAll();
+        },
+
+        openUnitDropdown() {
+          AppState.bookingForm.unitDropdownOpen = true;
+          const list = document.getElementById('unit-kerja-dropdown-list');
+          if (list) {
+            list.innerHTML = renderUnitDropdownItems(AppState.bookingForm.unitSearch);
+            list.classList.remove('hidden');
+          }
+        },
+
+        toggleUnitDropdown() {
+          const list = document.getElementById('unit-kerja-dropdown-list');
+          if (!list) return;
+          const willOpen = list.classList.contains('hidden');
+          AppState.bookingForm.unitDropdownOpen = willOpen;
+          if (willOpen) {
+            list.innerHTML = renderUnitDropdownItems('');
+            list.classList.remove('hidden');
+          } else {
+            list.classList.add('hidden');
+          }
+        },
+
+        filterUnitDropdown(query) {
+          AppState.bookingForm.unitSearch = query;
+          AppState.bookingForm.unitDropdownOpen = true;
+          const trimmed = String(query || '').trim();
+          const exact = UNIT_KERJA_LIST.find((u) => u.toLowerCase() === trimmed.toLowerCase());
+          AppState.bookingForm.unit_kerja = exact || '';
+          const list = document.getElementById('unit-kerja-dropdown-list');
+          if (list) {
+            list.innerHTML = renderUnitDropdownItems(query);
+            list.classList.remove('hidden');
+          }
+        },
+
+        selectUnitKerja(unitName) {
+          AppState.bookingForm.unit_kerja = unitName;
+          AppState.bookingForm.unitSearch = unitName;
+          AppState.bookingForm.unitDropdownOpen = false;
+          const input = document.getElementById('unit-kerja-search-input');
+          const list = document.getElementById('unit-kerja-dropdown-list');
+          if (input) input.value = unitName;
+          if (list) list.classList.add('hidden');
+        },
+
+        applyTujuanPreset(idx) {
+          const chip = TUJUAN_PRESET_CHIPS[idx];
+          if (!chip) return;
+          AppState.bookingForm.selectedChip = chip.label;
+          AppState.bookingForm.tujuan = chip.tujuan;
+          AppState.bookingForm.keperluan = chip.keperluan;
+          renderAll();
+        },
+
         goToBookingStep2() {
           const bf = AppState.bookingForm;
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
@@ -9418,32 +9740,130 @@
         },
 
         selectBookingVehicle(vehicleId) {
-          AppState.bookingForm.vehicle_id = vehicleId;
+          const bf = AppState.bookingForm;
+          if (!Array.isArray(bf.vehicle_ids)) bf.vehicle_ids = bf.vehicle_id ? [bf.vehicle_id] : [];
+          if (!bf.driver_assignments || typeof bf.driver_assignments !== 'object') bf.driver_assignments = {};
+
+          const idx = bf.vehicle_ids.indexOf(vehicleId);
+          if (idx > -1) {
+            bf.vehicle_ids.splice(idx, 1);
+            delete bf.driver_assignments[vehicleId];
+          } else {
+            // Batasi maksimal unit sesuai jumlah pengemudi tersedia pada slot waktu ini
+            const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
+            const availDriversCount = AppState.data.drivers.filter((d) =>
+              getDriverAvailability(d, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai).available
+            ).length;
+            if (availDriversCount > 0 && bf.vehicle_ids.length >= availDriversCount) {
+              showToast('Batas Pengemudi Tersedia', `Pada jadwal ini hanya tersedia ${availDriversCount} pengemudi, sehingga maksimal ${availDriversCount} unit kendaraan dapat dipilih sekaligus.`, 'warning');
+              return;
+            }
+            bf.vehicle_ids.push(vehicleId);
+          }
+
+          bf.vehicle_id = bf.vehicle_ids[0] || '';
+          bf.driver_id = bf.vehicle_id ? (bf.driver_assignments[bf.vehicle_id] || '') : '';
+          if (!bf.vehicle_ids.includes(bf.activeAssignVehicleId)) {
+            bf.activeAssignVehicleId = bf.vehicle_ids[0] || '';
+          }
+          renderAll();
+        },
+
+        clearBookingVehicles() {
+          AppState.bookingForm.vehicle_ids = [];
+          AppState.bookingForm.vehicle_id = '';
+          AppState.bookingForm.driver_id = '';
+          AppState.bookingForm.driver_assignments = {};
+          AppState.bookingForm.activeAssignVehicleId = '';
           renderAll();
         },
 
         goToBookingStep3() {
-          if (!AppState.bookingForm.vehicle_id) {
-            showToast('Pilih Armada', 'Silakan pilih salah satu kendaraan yang tersedia terlebih dahulu.', 'warning');
+          const bf = AppState.bookingForm;
+          const ids = Array.isArray(bf.vehicle_ids) && bf.vehicle_ids.length > 0 ? bf.vehicle_ids : (bf.vehicle_id ? [bf.vehicle_id] : []);
+          if (ids.length === 0) {
+            showToast('Pilih Armada', 'Silakan pilih minimal 1 kendaraan yang tersedia terlebih dahulu.', 'warning');
             return;
           }
-          AppState.bookingForm.step = 3;
+          bf.vehicle_ids = ids;
+          bf.vehicle_id = ids[0];
+          bf.activeAssignVehicleId = ids.find((vid) => !bf.driver_assignments?.[vid]) || ids[0];
+          bf.step = 3;
+          renderAll();
+        },
+
+        setActiveAssignVehicle(vehicleId) {
+          AppState.bookingForm.activeAssignVehicleId = vehicleId;
           renderAll();
         },
 
         selectBookingDriver(driverId) {
-          AppState.bookingForm.driver_id = driverId;
+          const bf = AppState.bookingForm;
+          if (!Array.isArray(bf.vehicle_ids) || bf.vehicle_ids.length === 0) {
+            if (bf.vehicle_id) bf.vehicle_ids = [bf.vehicle_id];
+          }
+          if (!bf.driver_assignments || typeof bf.driver_assignments !== 'object') bf.driver_assignments = {};
+
+          const targetVehId = bf.activeAssignVehicleId || bf.vehicle_ids[0] || bf.vehicle_id;
+          if (!targetVehId) return;
+
+          // Pastikan 1 driver tidak dipasangkan ke 2 unit berbeda pada rombongan yang sama
+          const usedByOther = Object.keys(bf.driver_assignments).find(
+            (vid) => vid !== targetVehId && bf.driver_assignments[vid] === driverId
+          );
+          if (usedByOther) {
+            showToast('Driver Sudah Dipilih', 'Pengemudi ini sudah ditugaskan ke unit lain dalam pengajuan ini.', 'warning');
+            return;
+          }
+
+          bf.driver_assignments[targetVehId] = driverId;
+          bf.driver_id = bf.vehicle_ids[0] ? (bf.driver_assignments[bf.vehicle_ids[0]] || '') : driverId;
+
+          // Auto-pindah ke unit berikutnya yang belum memiliki pengemudi agar praktis
+          const nextUnassigned = bf.vehicle_ids.find((vid) => !bf.driver_assignments[vid]);
+          if (nextUnassigned) {
+            bf.activeAssignVehicleId = nextUnassigned;
+          }
           renderAll();
+        },
+
+        autoAssignBookingDrivers() {
+          const bf = AppState.bookingForm;
+          const ids = Array.isArray(bf.vehicle_ids) ? bf.vehicle_ids : [];
+          if (ids.length === 0) return;
+          if (!bf.driver_assignments || typeof bf.driver_assignments !== 'object') bf.driver_assignments = {};
+
+          const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
+          const usedDrivers = new Set(Object.values(bf.driver_assignments).filter(Boolean));
+          const availableDrivers = AppState.data.drivers
+            .filter((d) => !usedDrivers.has(d.id) && getDriverAvailability(d, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai).available)
+            .sort((a, b) => (Number(b.rating_rata_rata) || 0) - (Number(a.rating_rata_rata) || 0));
+
+          let assignedNow = 0;
+          ids.forEach((vid) => {
+            if (!bf.driver_assignments[vid] && availableDrivers.length > 0) {
+              const pick = availableDrivers.shift();
+              bf.driver_assignments[vid] = pick.id;
+              assignedNow++;
+            }
+          });
+          bf.driver_id = ids[0] ? (bf.driver_assignments[ids[0]] || '') : '';
+          bf.activeAssignVehicleId = ids.find((vid) => !bf.driver_assignments[vid]) || ids[0];
+          renderAll();
+          if (assignedNow > 0) {
+            showToast('Pengemudi Dipasangkan', `${assignedNow} pengemudi tersedia otomatis dipasangkan ke unit rombongan.`, 'success');
+          }
         },
 
         submitBooking() {
           const bf = AppState.bookingForm;
-          const veh = getVehicleById(bf.vehicle_id);
-          const drv = getDriverById(bf.driver_id);
           const tglSelesai = bf.tanggal_selesai && bf.tanggal_selesai >= bf.tanggal ? bf.tanggal_selesai : bf.tanggal;
+          const vehIds = Array.isArray(bf.vehicle_ids) && bf.vehicle_ids.length > 0
+            ? [...new Set(bf.vehicle_ids)]
+            : (bf.vehicle_id ? [bf.vehicle_id] : []);
 
-          if (!veh || !drv) {
-            showToast('Data Belum Lengkap', 'Pilih armada dan pengemudi yang tersedia.', 'warning');
+          if (vehIds.length === 0) {
+            showToast('Data Belum Lengkap', 'Pilih minimal 1 armada yang tersedia.', 'warning');
             return;
           }
 
@@ -9459,41 +9879,72 @@
             return;
           }
 
-          // Final atomic anti-conflict guard (1 hari & multi-hari)
-          const vAvail = getVehicleAvailability(veh, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
-          const dAvail = getDriverAvailability(drv, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
-          if (!vAvail.available || !dAvail.available) {
-            showToast('Jadwal Bentrok Terdeteksi', !vAvail.available ? `Armada ${veh.plat_nomor}: ${vAvail.reason}` : `Pengemudi ${drv.nama}: ${dAvail.reason}`, 'error');
-            renderAll();
-            return;
+          // Validasi atomik seluruh pasangan (Armada + Pengemudi unik) sebelum menyimpan 1 pun
+          const pairs = [];
+          const chosenDriverSet = new Set();
+          for (let i = 0; i < vehIds.length; i++) {
+            const vid = vehIds[i];
+            const veh = getVehicleById(vid);
+            const did = (bf.driver_assignments && bf.driver_assignments[vid]) || (vehIds.length === 1 ? bf.driver_id : '');
+            const drv = getDriverById(did);
+            if (!veh || !drv) {
+              showToast('Pengemudi Belum Lengkap', `Silakan pilih pengemudi untuk seluruh ${vehIds.length} kendaraan terpilih.`, 'warning');
+              return;
+            }
+            if (chosenDriverSet.has(drv.id)) {
+              showToast('Duplikasi Pengemudi', `Pengemudi ${drv.nama} tidak dapat ditugaskan ke lebih dari 1 kendaraan pada waktu bersamaan.`, 'error');
+              return;
+            }
+            chosenDriverSet.add(drv.id);
+
+            const vAvail = getVehicleAvailability(veh, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
+            const dAvail = getDriverAvailability(drv, bf.tanggal, tglSelesai, bf.jam_mulai, bf.jam_selesai);
+            if (!vAvail.available || !dAvail.available) {
+              showToast('Jadwal Bentrok Terdeteksi', !vAvail.available ? `Armada ${veh.plat_nomor}: ${vAvail.reason}` : `Pengemudi ${drv.nama}: ${dAvail.reason}`, 'error');
+              renderAll();
+              return;
+            }
+            pairs.push({ veh, drv });
           }
 
-          const newBooking = {
-            id: generateId('bkg'),
-            kode_booking: generateNextBookingCode(bf.tanggal),
-            nama_peminjam: bf.nama_peminjam.trim(),
-            unit_kerja: bf.unit_kerja.trim(),
-            tujuan: bf.tujuan.trim(),
-            keperluan: bf.keperluan.trim(),
-            tanggal: bf.tanggal,
-            tanggal_selesai: tglSelesai,
-            jam_mulai: bf.jam_mulai,
-            jam_selesai: bf.jam_selesai,
-            vehicle_id: veh.id,
-            driver_id: drv.id,
-            km_awal: veh.odometer_saat_ini,
-            km_akhir: null,
-            status: 'ACTIVE',
-            rating: null,
-            ulasan_tags: [],
-            ulasan_catatan: '',
-            waktu_mulai_aktual: '',
-            waktu_selesai_aktual: '',
-            created_at: formatNowWibStamp()
-          };
+          const isMulti = pairs.length > 1;
+          const baseKeperluan = bf.keperluan.trim();
+          const nowStamp = formatNowWibStamp();
+          const createdBookings = [];
 
-          AppState.data.bookings.unshift(newBooking);
-          SyncEngine.knownBookingIds.add(newBooking.id);
+          pairs.forEach(({ veh, drv }, idx) => {
+            const unitTag = isMulti ? `[Rombongan Unit ${idx + 1}/${pairs.length}]` : '';
+            const keperluanText = isMulti
+              ? (baseKeperluan ? `${unitTag} ${baseKeperluan}` : unitTag)
+              : baseKeperluan;
+            const newBooking = {
+              id: generateId('bkg'),
+              kode_booking: generateNextBookingCode(bf.tanggal),
+              nama_peminjam: bf.nama_peminjam.trim(),
+              unit_kerja: bf.unit_kerja.trim(),
+              tujuan: bf.tujuan.trim(),
+              keperluan: keperluanText,
+              tanggal: bf.tanggal,
+              tanggal_selesai: tglSelesai,
+              jam_mulai: bf.jam_mulai,
+              jam_selesai: bf.jam_selesai,
+              vehicle_id: veh.id,
+              driver_id: drv.id,
+              km_awal: veh.odometer_saat_ini,
+              km_akhir: null,
+              status: 'ACTIVE',
+              rating: null,
+              ulasan_tags: [],
+              ulasan_catatan: '',
+              waktu_mulai_aktual: '',
+              waktu_selesai_aktual: '',
+              created_at: nowStamp
+            };
+            AppState.data.bookings.unshift(newBooking);
+            SyncEngine.knownBookingIds.add(newBooking.id);
+            createdBookings.push(newBooking);
+          });
+
           // Reset wizard selections ke slot jadwal mendatang yang valid
           const nextSlot = getSmartDefaultBookingSchedule();
           AppState.bookingForm.step = 1;
@@ -9506,12 +9957,18 @@
           AppState.bookingForm.selectedChip = '';
           AppState.bookingForm.vehicle_id = '';
           AppState.bookingForm.driver_id = '';
+          AppState.bookingForm.vehicle_ids = [];
+          AppState.bookingForm.driver_assignments = {};
+          AppState.bookingForm.activeAssignVehicleId = '';
 
-          SyncEngine.persistAndBroadcast('CREATE_BOOKING', { kode_booking: newBooking.kode_booking });
-          SyncEngine.postToGAS('CREATE_BOOKING', newBooking);
+          const summaryCode = isMulti
+            ? `${createdBookings.length} unit (${createdBookings[0].kode_booking}–${createdBookings[createdBookings.length - 1].kode_booking})`
+            : createdBookings[0].kode_booking;
+          SyncEngine.persistAndBroadcast('CREATE_BOOKING', { kode_booking: summaryCode });
+          SyncEngine.postBookingsToGAS(createdBookings);
 
           renderAll();
-          openBookingSuccessModal(newBooking);
+          openBookingSuccessModal(isMulti ? createdBookings : createdBookings[0]);
         },
 
         // --- DRIVER: OPERASIONAL LAPANGAN & BBM / E-TOLL (OTOMATIS TERCATAT ATAS activeDriverId) ---
@@ -9782,6 +10239,11 @@
         submitRating() {
           const b = getBookingById(RatingModalState.bookingId);
           if (!b) return;
+          if (b.rating) {
+            closeModal();
+            renderAll();
+            return;
+          }
           const drv = getDriverById(b.driver_id);
           const notesEl = document.getElementById('rating-notes');
 
@@ -9791,7 +10253,7 @@
 
           if (drv) {
             // Kalkulasi ulang rating rata-rata pengemudi secara real-time (berbobot total trip)
-            const prevTrips = Math.max(1, (Number(drv.total_trip) || 1) - 1);
+            const prevTrips = Math.max(0, (Number(drv.total_trip) || 1) - 1);
             const updatedAvg = ((Number(drv.rating_rata_rata) * prevTrips) + Number(b.rating)) / (prevTrips + 1);
             drv.rating_rata_rata = Number(Math.min(5, Math.max(1, updatedAvg)).toFixed(2));
           }
